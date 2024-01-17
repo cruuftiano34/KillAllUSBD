@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://github.com/cruuftiano34/KillAllUSBD"><img src="https://github.com/cruuftiano34/KillAllUSBD/main.png" />
+  <a href="https://github.com/cruuftiano34/KillAllUSBD"><img src="https://github.com/cruuftiano34/KillAllUSBD/blob/0550930ea31e78b06b6fba47375a0670d8b65e0c/main.png" />
 </p>
 
 # KillAllUSBD
