@@ -17,6 +17,7 @@ echo ""
 	
 #Important Part
 
-sudo chmod +x && sudo killall usbd && sudo killall -STOP -c usbd
+sudo killall usbd 
+sudo killall -STOP -c usbd
 
 # © 2024 Abductes Studios
