@@ -1,18 +1,13 @@
-#Image
-
 <p align="center">
-  <a href="https://github.com/jetfir3/SpotX-Bash"><img src="https://spotx-official.github.io/images/logos/logo_sxb.png" />
+  <a href="https://github.com/cruuftiano34/KillAllUSBD"><img src="https://github.com/cruuftiano34/KillAllUSBD/blob/df029b8e6deb57abf6834e696ef7197b79af9393/Screen%20Shot%202024-01-17%20at%209.25.29%20AM.png" />
 </p>
 
-<p align="center">        
-      <a href="https://github.com/amd64fox/SpotX"><img src="https://spotx-official.github.io/images/shields/spotx-win_sxb.svg"></a>
-      <a href="https://t.me/SpotxCommunity"><img src="https://spotx-official.github.io/images/shields/SpotX_Community.svg"></a>
-      </p>
-      
 # KillAllUSBD
 
-![GitHub](https://img.shields.io/github/license/your-username/KillAllUSBD)
-![GitHub last commit](https://img.shields.io/github/last-commit/your-username/KillAllUSBD)
+<p align="center">   
+<a![GitHub](https://img.shields.io/github/license/your-username/KillAllUSBD)></a>
+<a![GitHub last commit](https://img.shields.io/github/last-commit/your-username/KillAllUSBD)></a>
+</p>
 
 ## Description
 
