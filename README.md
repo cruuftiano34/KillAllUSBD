@@ -44,7 +44,7 @@ git clone https://github.com/cruuftiano34/KillAllUSBD.git
 To ensure proper functionality, run the script with superuser privileges. Enter your password when prompted. (Do this after using cd and git clone)
 
 ```bash
-sudo ./KillAllUSBD.sh
+sudo ./KillAllUSBD_by_@abductesstudios.sh
 ```
 
 ## Changes_made:
