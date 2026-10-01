@@ -16,7 +16,7 @@ exit /b
   |____/  \___/ |_| \_\|_|  |_|/_/   \_\|_| \_|  |_|
 
   DORMANT  //  power schedule + idle loop system
-  v4.0.0   //  made by Marcelo Torres
+  v4.1.0   //  made by Marcelo Torres
   target   //  Windows 10 / 11
   usage    //  copy to a USB drive, double-click, choose a video
 #>
@@ -25,7 +25,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:Version        = '4.0.0'
+$script:Version        = '4.1.0'
 $script:Author         = 'Marcelo Torres'
 $script:Root           = Join-Path $env:ProgramData 'DORMANT'
 $script:ExePath        = Join-Path $script:Root 'DORMANT.exe'
@@ -37,7 +37,7 @@ $script:WakeWeek       = '10:00'
 $script:WakeSunday     = '12:00'
 $script:SleepWeek      = '18:00'
 $script:SleepSunday    = '17:00'
-$script:Formats        = @('.mp4', '.m4v', '.mov')
+$script:Formats        = @('.mp4', '.m4v', '.mov', '.mkv', '.avi', '.wmv', '.webm', '.mpg', '.mpeg', '.m2ts', '.ts', '.flv', '.3gp', '.ogv', '.ogg')
 $script:LogoPaths      = @('AgLogo\AgLogo.png', 'AgLogo.png', 'Dormant\AgLogo\AgLogo.png', 'AgLogo\AgLogo.jpg', 'AgLogo.jpg')
 $script:WallPaths      = @('Walllpapers\AgWallpaper.png', 'Wallpapers\AgWallpaper.png', 'AgWallpaper.png', 'Walllpapers\AgWallpaper.jpg', 'Wallpapers\AgWallpaper.jpg', 'AgWallpaper.jpg', 'Walllpapers\AgWallpaper.jpeg', 'Wallpapers\AgWallpaper.jpeg')
 $script:WidePaths      = @('Walllpapers\AgWallpaperUltraw.png', 'Wallpapers\AgWallpaperUltraw.png', 'AgWallpaperUltraw.png', 'Walllpapers\AgWallpaperUltraw.jpg', 'Wallpapers\AgWallpaperUltraw.jpg', 'AgWallpaperUltraw.jpg')
@@ -466,28 +466,34 @@ namespace Dormant
 
     internal sealed class LoopScreen
     {
+        private sealed class Layer
+        {
+            public FrameworkElement Element;
+            public TranslateTransform Shift;
+            public int Delay;
+        }
+
         private readonly LoopController owner;
         private readonly bool primary;
         private readonly bool testMode;
         private readonly Window window;
         private readonly MediaElement video;
-        private readonly string videoPath;
-        private readonly List<FrameworkElement> panels = new List<FrameworkElement>();
+        private readonly List<Layer> layers = new List<Layer>();
+        private double scale;
         private bool ready;
         private bool broken;
         private bool shown;
 
-        private static readonly Color Ink = Color.FromRgb(0xF4, 0xF3, 0xEF);
+        private static readonly Color Snow = Color.FromRgb(0xF5, 0xF5, 0xF7);
+        private static readonly Color Green = Color.FromRgb(0x30, 0xD1, 0x58);
 
         public LoopScreen(LoopController controller, string videoPath, Rect bounds, bool primary, bool testMode, string logoPath)
         {
             owner = controller;
             this.primary = primary;
             this.testMode = testMode;
-            this.videoPath = videoPath;
-
-            double scale = bounds.Height > 0 ? bounds.Height / 1080.0 : 1.0;
-            if (scale < 0.5) { scale = 0.5; }
+            scale = bounds.Height > 0 ? bounds.Height / 1080.0 : 1.0;
+            if (scale < 0.55) { scale = 0.55; }
 
             video = new MediaElement();
             video.LoadedBehavior = MediaState.Manual;
@@ -499,39 +505,17 @@ namespace Dormant
             video.MediaOpened += OnMediaOpened;
             video.MediaEnded += OnMediaEnded;
             video.MediaFailed += OnMediaFailed;
+            try { video.Source = new Uri(videoPath, UriKind.Absolute); }
+            catch (Exception) { }
 
             Grid root = new Grid();
             root.Background = Brushes.Black;
             root.Children.Add(video);
+            root.Children.Add(BuildScrim());
 
-            Border shade = new Border();
-            shade.IsHitTestVisible = false;
-            LinearGradientBrush vign = new LinearGradientBrush();
-            vign.StartPoint = new Point(0.5, 0.0);
-            vign.EndPoint = new Point(0.5, 1.0);
-            vign.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0, 0, 0), 0.0));
-            vign.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0, 0, 0), 0.55));
-            vign.GradientStops.Add(new GradientStop(Color.FromArgb(0x66, 0, 0, 0), 1.0));
-            shade.Background = vign;
-            root.Children.Add(shade);
-
-            FrameworkElement specs = BuildSpecs(scale);
-            if (specs != null)
-            {
-                root.Children.Add(specs);
-                panels.Add(specs);
-            }
-
-            FrameworkElement notice = BuildNotice(scale);
-            root.Children.Add(notice);
-            panels.Add(notice);
-
-            FrameworkElement logo = BuildLogo(scale, logoPath);
-            if (logo != null)
-            {
-                root.Children.Add(logo);
-                panels.Add(logo);
-            }
+            Register(root, BuildNotice(), 0);
+            Register(root, BuildSpecs(), 110);
+            Register(root, BuildLogo(logoPath), 220);
 
             window = new Window();
             window.Title = "DORMANT";
@@ -550,53 +534,81 @@ namespace Dormant
             window.Cursor = Cursors.None;
             window.Content = root;
             window.Closing += OnClosing;
-
-            foreach (FrameworkElement panel in panels)
-            {
-                panel.Opacity = 0.0;
-            }
         }
 
         public bool Ready { get { return ready; } }
 
-        private SolidColorBrush Faint() { return new SolidColorBrush(Color.FromArgb(0x6B, Ink.R, Ink.G, Ink.B)); }
-        private SolidColorBrush Muted() { return new SolidColorBrush(Color.FromArgb(0xAD, Ink.R, Ink.G, Ink.B)); }
-        private SolidColorBrush Line() { return new SolidColorBrush(Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF)); }
-
-        private Border Card(double scale)
+        private void Register(Grid root, FrameworkElement element, int delay)
         {
-            Border card = new Border();
-            card.Background = new SolidColorBrush(Color.FromArgb(0xB8, 0x09, 0x09, 0x0B));
-            card.BorderBrush = Line();
-            card.BorderThickness = new Thickness(1);
-            card.Effect = new DropShadowEffect { BlurRadius = 34 * scale, ShadowDepth = 12 * scale, Direction = 270, Opacity = 0.45, Color = Colors.Black };
-            return card;
+            if (element == null) { return; }
+            TranslateTransform shift = new TranslateTransform(0, 34 * scale);
+            element.RenderTransform = shift;
+            element.Opacity = 0.0;
+            root.Children.Add(element);
+            Layer layer = new Layer();
+            layer.Element = element;
+            layer.Shift = shift;
+            layer.Delay = delay;
+            layers.Add(layer);
         }
 
-        private TextBlock Mono(string text, double size, Brush brush)
+        private SolidColorBrush Ink(double alpha)
+        {
+            return new SolidColorBrush(Color.FromArgb((byte)(alpha * 255.0), Snow.R, Snow.G, Snow.B));
+        }
+
+        private TextBlock Type(string text, double size, FontWeight weight, Brush brush)
         {
             TextBlock block = new TextBlock();
             block.Text = text;
-            block.FontFamily = new FontFamily("Cascadia Mono, Consolas, Courier New");
-            block.FontSize = size;
-            block.Foreground = brush;
-            block.TextWrapping = TextWrapping.NoWrap;
-            return block;
-        }
-
-        private TextBlock Sans(string text, double size, Brush brush, FontWeight weight)
-        {
-            TextBlock block = new TextBlock();
-            block.Text = text;
-            block.FontFamily = new FontFamily("Segoe UI, Arial");
-            block.FontSize = size;
+            block.FontFamily = new FontFamily("Segoe UI Variable Display, Segoe UI, Arial");
+            block.FontSize = size * scale;
             block.FontWeight = weight;
             block.Foreground = brush;
             block.TextWrapping = TextWrapping.Wrap;
             return block;
         }
 
-        private FrameworkElement BuildSpecs(double scale)
+        private TextBlock Line(string text, double size, FontWeight weight, Brush brush)
+        {
+            TextBlock block = Type(text, size, weight, brush);
+            block.TextWrapping = TextWrapping.NoWrap;
+            return block;
+        }
+
+        private Border Card()
+        {
+            Border card = new Border();
+            card.Background = new SolidColorBrush(Color.FromArgb(0xB5, 0x1C, 0x1C, 0x1E));
+            card.BorderBrush = new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(22 * scale);
+            card.SnapsToDevicePixels = true;
+            card.Effect = new DropShadowEffect();
+            ((DropShadowEffect)card.Effect).BlurRadius = 60 * scale;
+            ((DropShadowEffect)card.Effect).ShadowDepth = 22 * scale;
+            ((DropShadowEffect)card.Effect).Direction = 270;
+            ((DropShadowEffect)card.Effect).Opacity = 0.55;
+            ((DropShadowEffect)card.Effect).Color = Colors.Black;
+            return card;
+        }
+
+        private FrameworkElement BuildScrim()
+        {
+            Border scrim = new Border();
+            scrim.IsHitTestVisible = false;
+            LinearGradientBrush brush = new LinearGradientBrush();
+            brush.StartPoint = new Point(0, 0);
+            brush.EndPoint = new Point(0, 1);
+            brush.GradientStops.Add(new GradientStop(Color.FromArgb(0x30, 0, 0, 0), 0.0));
+            brush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0, 0, 0), 0.34));
+            brush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0, 0, 0), 0.60));
+            brush.GradientStops.Add(new GradientStop(Color.FromArgb(0x78, 0, 0, 0), 1.0));
+            scrim.Background = brush;
+            return scrim;
+        }
+
+        private FrameworkElement BuildSpecs()
         {
             List<KeyValuePair<string, string>> pairs = SpecReader.Pairs();
             if (pairs.Count == 0)
@@ -604,115 +616,100 @@ namespace Dormant
                 return null;
             }
             StackPanel stack = new StackPanel();
-
-            TextBlock head = Mono("THIS MACHINE", 11 * scale, Faint());
-            head.Margin = new Thickness(0, 0, 0, 9 * scale);
+            TextBlock head = Line("THIS MACHINE", 11.5, FontWeights.SemiBold, Ink(0.42));
+            head.Margin = new Thickness(0, 0, 0, 15 * scale);
             stack.Children.Add(head);
-
-            Border rule = new Border();
-            rule.Height = 1;
-            rule.Background = Line();
-            rule.Margin = new Thickness(0, 0, 0, 9 * scale);
-            stack.Children.Add(rule);
-
-            Grid grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             for (int i = 0; i < pairs.Count; i++)
             {
-                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-                TextBlock label = Mono(pairs[i].Key.ToUpperInvariant(), 10.5 * scale, Faint());
-                label.Margin = new Thickness(0, i == 0 ? 0 : 5 * scale, 14 * scale, 0);
-                Grid.SetRow(label, i);
-                Grid.SetColumn(label, 0);
-                grid.Children.Add(label);
-
-                TextBlock value = Sans(pairs[i].Value, 14 * scale, new SolidColorBrush(Ink), FontWeights.Normal);
-                value.Margin = new Thickness(0, i == 0 ? 0 : 5 * scale, 0, 0);
-                Grid.SetRow(value, i);
-                Grid.SetColumn(value, 1);
-                grid.Children.Add(value);
+                DockPanel row = new DockPanel();
+                row.LastChildFill = false;
+                if (i > 0)
+                {
+                    row.Margin = new Thickness(0, 10 * scale, 0, 0);
+                }
+                TextBlock key = Line(pairs[i].Key, 14, FontWeights.Normal, Ink(0.5));
+                DockPanel.SetDock(key, Dock.Left);
+                TextBlock val = Line(pairs[i].Value, 14, FontWeights.SemiBold, Ink(0.95));
+                val.Margin = new Thickness(28 * scale, 0, 0, 0);
+                DockPanel.SetDock(val, Dock.Right);
+                row.Children.Add(key);
+                row.Children.Add(val);
+                stack.Children.Add(row);
             }
-            stack.Children.Add(grid);
-
-            Border card = Card(scale);
-            card.Padding = new Thickness(18 * scale, 15 * scale, 20 * scale, 16 * scale);
-            card.MinWidth = 210 * scale;
-            card.MaxWidth = 340 * scale;
+            Border card = Card();
+            card.Padding = new Thickness(26 * scale, 22 * scale, 28 * scale, 24 * scale);
+            card.MinWidth = 270 * scale;
+            card.MaxWidth = 400 * scale;
             card.HorizontalAlignment = HorizontalAlignment.Left;
             card.VerticalAlignment = VerticalAlignment.Top;
-            card.Margin = new Thickness(40 * scale, 40 * scale, 0, 0);
+            card.Margin = new Thickness(48 * scale, 48 * scale, 0, 0);
             card.Child = stack;
             return card;
         }
 
-        private FrameworkElement BuildNotice(double scale)
+        private FrameworkElement BuildNotice()
         {
             StackPanel stack = new StackPanel();
 
-            DockPanel meta = new DockPanel();
-            meta.Margin = new Thickness(0, 0, 0, 11 * scale);
-            TextBlock brand = Mono("AG LIQUIDATION", 11 * scale, Muted());
+            DockPanel top = new DockPanel();
+            top.LastChildFill = false;
+            top.Margin = new Thickness(0, 0, 0, 20 * scale);
+            TextBlock brand = Line("AG LIQUIDATION", 12, FontWeights.SemiBold, Ink(0.55));
             DockPanel.SetDock(brand, Dock.Left);
-            meta.Children.Add(brand);
+            top.Children.Add(brand);
 
-            StackPanel state = new StackPanel();
-            state.Orientation = Orientation.Horizontal;
-            state.HorizontalAlignment = HorizontalAlignment.Right;
+            Border pill = new Border();
+            pill.Background = new SolidColorBrush(Color.FromArgb(0x26, 0x30, 0xD1, 0x58));
+            pill.CornerRadius = new CornerRadius(100);
+            pill.Padding = new Thickness(11 * scale, 5 * scale, 13 * scale, 6 * scale);
+            pill.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(pill, Dock.Right);
+            StackPanel pillRow = new StackPanel();
+            pillRow.Orientation = Orientation.Horizontal;
             Border dot = new Border();
             dot.Width = 7 * scale;
             dot.Height = 7 * scale;
-            dot.Background = new SolidColorBrush(Ink);
-            dot.Margin = new Thickness(0, 0, 8 * scale, 0);
+            dot.CornerRadius = new CornerRadius(100);
+            dot.Background = new SolidColorBrush(Green);
             dot.VerticalAlignment = VerticalAlignment.Center;
-            DoubleAnimation pulse = new DoubleAnimation(1.0, 0.25, new Duration(TimeSpan.FromMilliseconds(1200)));
+            dot.Margin = new Thickness(0, 0, 7 * scale, 0);
+            DoubleAnimation pulse = new DoubleAnimation(1.0, 0.35, new Duration(TimeSpan.FromMilliseconds(1500)));
             pulse.AutoReverse = true;
             pulse.RepeatBehavior = RepeatBehavior.Forever;
+            pulse.EasingFunction = new SineEase();
+            ((SineEase)pulse.EasingFunction).EasingMode = EasingMode.EaseInOut;
             dot.BeginAnimation(UIElement.OpacityProperty, pulse);
-            state.Children.Add(dot);
-            state.Children.Add(Mono("READY TO USE", 11 * scale, Faint()));
-            meta.Children.Add(state);
-            stack.Children.Add(meta);
+            TextBlock ready = Line("Ready", 12, FontWeights.SemiBold, new SolidColorBrush(Color.FromRgb(0x63, 0xE6, 0x8A)));
+            pillRow.Children.Add(dot);
+            pillRow.Children.Add(ready);
+            pill.Child = pillRow;
+            top.Children.Add(pill);
+            stack.Children.Add(top);
 
-            Border rule = new Border();
-            rule.Height = 1;
-            rule.Background = Line();
-            rule.Margin = new Thickness(0, 0, 0, 13 * scale);
-            stack.Children.Add(rule);
-
-            TextBlock title = Sans("Ready when you are.", 29 * scale, new SolidColorBrush(Ink), FontWeights.SemiBold);
-            title.Margin = new Thickness(0, 0, 0, 11 * scale);
+            TextBlock title = Type("Ready when you are.", 33, FontWeights.SemiBold, Ink(1.0));
+            title.Margin = new Thickness(0, 0, 0, 13 * scale);
             stack.Children.Add(title);
 
-            TextBlock line1 = Sans("Every computer here comes with its programs fully installed and permanently activated.", 16 * scale, Muted(), FontWeights.Normal);
-            line1.Margin = new Thickness(0, 0, 0, 7 * scale);
-            line1.LineHeight = 23 * scale;
-            stack.Children.Add(line1);
+            TextBlock body = Type("Every computer here comes with its programs fully installed and permanently activated.", 16.5, FontWeights.Normal, Ink(0.62));
+            body.LineHeight = 26 * scale;
+            body.Margin = new Thickness(0, 0, 0, 9 * scale);
+            stack.Children.Add(body);
 
-            TextBlock line2 = Sans("Need a program that isn't included? Please ask any AG Liquidation team member. We'll be glad to help.", 16 * scale, Muted(), FontWeights.Normal);
-            line2.LineHeight = 23 * scale;
-            stack.Children.Add(line2);
+            TextBlock body2 = Type("Need something that isn't included? Ask any AG Liquidation team member — we're glad to help.", 16.5, FontWeights.Normal, Ink(0.62));
+            body2.LineHeight = 26 * scale;
+            stack.Children.Add(body2);
 
-            Border rule2 = new Border();
-            rule2.Height = 1;
-            rule2.Background = Line();
-            rule2.Margin = new Thickness(0, 15 * scale, 0, 12 * scale);
-            stack.Children.Add(rule2);
-
-            stack.Children.Add(Sans("Thank you for shopping with us.", 13 * scale, Faint(), FontWeights.Normal));
-
-            Border card = Card(scale);
-            card.Padding = new Thickness(22 * scale, 20 * scale, 24 * scale, 20 * scale);
-            card.Width = 470 * scale;
+            Border card = Card();
+            card.Padding = new Thickness(32 * scale, 28 * scale, 34 * scale, 30 * scale);
+            card.Width = 520 * scale;
             card.HorizontalAlignment = HorizontalAlignment.Left;
             card.VerticalAlignment = VerticalAlignment.Bottom;
-            card.Margin = new Thickness(40 * scale, 0, 0, 40 * scale);
+            card.Margin = new Thickness(48 * scale, 0, 0, 48 * scale);
             card.Child = stack;
             return card;
         }
 
-        private FrameworkElement BuildLogo(double scale, string logoPath)
+        private FrameworkElement BuildLogo(string logoPath)
         {
             if (string.IsNullOrEmpty(logoPath) || !File.Exists(logoPath))
             {
@@ -733,8 +730,13 @@ namespace Dormant
                 image.Width = 300 * scale;
                 image.HorizontalAlignment = HorizontalAlignment.Right;
                 image.VerticalAlignment = VerticalAlignment.Bottom;
-                image.Margin = new Thickness(0, 0, 44 * scale, 44 * scale);
-                image.Effect = new DropShadowEffect { BlurRadius = 24 * scale, ShadowDepth = 6 * scale, Direction = 270, Opacity = 0.75, Color = Colors.Black };
+                image.Margin = new Thickness(0, 0, 52 * scale, 52 * scale);
+                image.Effect = new DropShadowEffect();
+                ((DropShadowEffect)image.Effect).BlurRadius = 30 * scale;
+                ((DropShadowEffect)image.Effect).ShadowDepth = 9 * scale;
+                ((DropShadowEffect)image.Effect).Direction = 270;
+                ((DropShadowEffect)image.Effect).Opacity = 0.7;
+                ((DropShadowEffect)image.Effect).Color = Colors.Black;
                 return image;
             }
             catch (Exception)
@@ -765,18 +767,6 @@ namespace Dormant
 
         public void Start()
         {
-            if (video.Source == null)
-            {
-                try
-                {
-                    video.Source = new Uri(videoPath, UriKind.Absolute);
-                }
-                catch (Exception error)
-                {
-                    owner.OnScreenFailed(ExitCodes.VideoFailed, Program.Describe(error));
-                    return;
-                }
-            }
         }
 
         public void Play()
@@ -787,7 +777,6 @@ namespace Dormant
             }
             try
             {
-                video.Position = TimeSpan.Zero;
                 video.Play();
             }
             catch (Exception)
@@ -815,17 +804,16 @@ namespace Dormant
             {
                 return;
             }
-            if (!shown)
-            {
-                Play();
-                return;
-            }
             try
             {
                 video.Play();
             }
             catch (Exception)
             {
+            }
+            if (!shown)
+            {
+                Reveal();
             }
         }
 
@@ -841,33 +829,48 @@ namespace Dormant
         private void Reveal()
         {
             shown = true;
-            foreach (FrameworkElement panel in panels)
+            foreach (Layer layer in layers)
             {
-                Fade(panel, 1.0, 900);
+                DoubleAnimation fade = new DoubleAnimation(1.0, new Duration(TimeSpan.FromMilliseconds(720)));
+                fade.BeginTime = TimeSpan.FromMilliseconds(layer.Delay);
+                fade.EasingFunction = new CubicEase();
+                ((CubicEase)fade.EasingFunction).EasingMode = EasingMode.EaseOut;
+                DoubleAnimation slide = new DoubleAnimation(0.0, new Duration(TimeSpan.FromMilliseconds(900)));
+                slide.BeginTime = TimeSpan.FromMilliseconds(layer.Delay);
+                slide.EasingFunction = new BackEase();
+                ((BackEase)slide.EasingFunction).Amplitude = 0.22;
+                ((BackEase)slide.EasingFunction).EasingMode = EasingMode.EaseOut;
+                layer.Element.BeginAnimation(UIElement.OpacityProperty, fade);
+                layer.Shift.BeginAnimation(TranslateTransform.YProperty, slide);
             }
         }
 
         private void Conceal()
         {
             shown = false;
-            foreach (FrameworkElement panel in panels)
+            foreach (Layer layer in layers)
             {
-                panel.BeginAnimation(UIElement.OpacityProperty, null);
-                panel.Opacity = 0.0;
+                layer.Element.BeginAnimation(UIElement.OpacityProperty, null);
+                layer.Shift.BeginAnimation(TranslateTransform.YProperty, null);
+                layer.Element.Opacity = 0.0;
+                layer.Shift.Y = 34 * scale;
             }
-        }
-
-        private void Fade(FrameworkElement target, double to, int ms)
-        {
-            DoubleAnimation animation = new DoubleAnimation(to, new Duration(TimeSpan.FromMilliseconds(ms)));
-            animation.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
-            target.BeginAnimation(UIElement.OpacityProperty, animation);
         }
 
         private void OnMediaOpened(object sender, RoutedEventArgs e)
         {
             ready = true;
             owner.OnScreenReady(this);
+            if (shown)
+            {
+                try
+                {
+                    video.Play();
+                }
+                catch (Exception)
+                {
+                }
+            }
         }
 
         private void OnMediaEnded(object sender, RoutedEventArgs e)
@@ -912,7 +915,7 @@ namespace Dormant
         private const uint IdleThresholdMs = 30000;
         private const int EnsureEveryTicks = 4;
         private const uint ResumeDebounceMs = 10000;
-        private static readonly string[] Formats = new string[] { ".mp4", ".m4v", ".mov" };
+        private static readonly string[] Formats = new string[] { ".mp4", ".m4v", ".mov", ".mkv", ".avi", ".wmv", ".webm", ".mpg", ".mpeg", ".m2ts", ".ts", ".flv", ".3gp", ".ogv", ".ogg" };
 
         private readonly bool testMode;
         private readonly string baseFolder;
@@ -1420,7 +1423,7 @@ function Show-Banner {
     Write-Line ('  WAKE    mon-sat {0}    sun {1}' -f $script:WakeWeek, $script:WakeSunday)
     Write-Line ('  SLEEP   mon-sat {0}    sun {1}' -f $script:SleepWeek, $script:SleepSunday)
     Write-Line '  LOOP    after 30s of no input'
-    Write-Line '  VIDEO   mp4 / mov / m4v'
+    Write-Line '  VIDEO   mp4 / mov / mkv / avi / wmv / more'
     Write-Rule
     Write-Line
 }
@@ -1510,7 +1513,7 @@ function Select-OneVideo {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Title = $Prompt
     $dialog.InitialDirectory = [Environment]::GetFolderPath('Desktop')
-    $dialog.Filter = 'Video (*.mp4;*.mov;*.m4v)|*.mp4;*.mov;*.m4v'
+    $dialog.Filter = 'Video files|*.mp4;*.m4v;*.mov;*.mkv;*.avi;*.wmv;*.webm;*.mpg;*.mpeg;*.m2ts;*.ts;*.flv;*.3gp;*.ogv;*.ogg|All files|*.*'
     $dialog.Multiselect = $false
     $dialog.CheckFileExists = $true
     $dialog.RestoreDirectory = $true
@@ -1571,7 +1574,7 @@ function Initialize-Root {
     if (-not (Test-Path -LiteralPath $script:Root)) {
         New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
     }
-    foreach ($pattern in @('loop*.mp4', 'loop*.mov', 'loop*.m4v', 'logo.*', 'wallpaper.*', 'wallpaper-ultrawide.*', 'videos.txt', 'night.flag')) {
+    foreach ($pattern in @('loop*.*', 'logo.*', 'wallpaper.*', 'wallpaper-ultrawide.*', 'videos.txt', 'night.flag')) {
         Get-ChildItem -LiteralPath $script:Root -Filter $pattern -File -ErrorAction SilentlyContinue | Remove-Item -Force
     }
     $webTarget = Join-Path $script:Root 'web'
