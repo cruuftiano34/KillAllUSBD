@@ -16,7 +16,7 @@ exit /b
   |____/  \___/ |_| \_\|_|  |_|/_/   \_\|_| \_|  |_|
 
   DORMANT  //  power schedule + idle loop system
-  v3.0.0   //  made by Marcelo Torres
+  v4.0.0   //  made by Marcelo Torres
   target   //  Windows 10 / 11
   usage    //  copy to a USB drive, double-click, choose a video
 #>
@@ -25,11 +25,10 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:Version        = '3.1.0'
+$script:Version        = '4.0.0'
 $script:Author         = 'Marcelo Torres'
 $script:Root           = Join-Path $env:ProgramData 'DORMANT'
 $script:ExePath        = Join-Path $script:Root 'DORMANT.exe'
-$script:PagePath       = Join-Path $script:Root 'loop.html'
 $script:TaskPath       = '\DORMANT\'
 $script:PowerCfg       = Join-Path $env:WINDIR 'System32\powercfg.exe'
 $script:CacheDir       = Join-Path (Split-Path -Parent $env:DORMANT_SELF) 'DORMANT-cache'
@@ -38,17 +37,10 @@ $script:WakeWeek       = '10:00'
 $script:WakeSunday     = '12:00'
 $script:SleepWeek      = '18:00'
 $script:SleepSunday    = '17:00'
-$script:Formats        = @('.mp4', '.m4v', '.mov', '.webm')
-$script:WebView2Id     = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-$script:WebView2Setup  = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
-$script:WebView2SdkVer = '1.0.1518.46'
-$script:WebView2Sdk    = 'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1518.46'
-$script:SdkFiles       = @('Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll')
-$script:LoaderFlavors  = @('x64', 'x86', 'arm64')
+$script:Formats        = @('.mp4', '.m4v', '.mov')
 $script:LogoPaths      = @('AgLogo\AgLogo.png', 'AgLogo.png', 'Dormant\AgLogo\AgLogo.png', 'AgLogo\AgLogo.jpg', 'AgLogo.jpg')
 $script:WallPaths      = @('Walllpapers\AgWallpaper.png', 'Wallpapers\AgWallpaper.png', 'AgWallpaper.png', 'Walllpapers\AgWallpaper.jpg', 'Wallpapers\AgWallpaper.jpg', 'AgWallpaper.jpg', 'Walllpapers\AgWallpaper.jpeg', 'Wallpapers\AgWallpaper.jpeg')
 $script:WidePaths      = @('Walllpapers\AgWallpaperUltraw.png', 'Wallpapers\AgWallpaperUltraw.png', 'AgWallpaperUltraw.png', 'Walllpapers\AgWallpaperUltraw.jpg', 'Wallpapers\AgWallpaperUltraw.jpg', 'AgWallpaperUltraw.jpg')
-$script:CachePaths     = @('DORMANT-cache\webview2-sdk.nupkg', 'DORMANT\DORMANT-cache\webview2-sdk.nupkg', 'Dormant\DORMANT-cache\webview2-sdk.nupkg')
 $script:WebDirs        = @('Web', 'Dormant\Web')
 $script:NightFlag      = Join-Path $script:Root 'night.flag'
 $script:HelperPath     = Join-Path $script:Root 'night.cmd'
@@ -68,12 +60,15 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
-using Microsoft.Web.WebView2.Core;
 
 namespace Dormant
 {
@@ -116,12 +111,10 @@ namespace Dormant
 
         private static int Run(bool testMode)
         {
-            ConfigureLoader();
             string baseFolder = AppDomain.CurrentDomain.BaseDirectory;
-            string page = Path.Combine(baseFolder, "loop.html");
-            if (!File.Exists(page))
+            if (LoopController.FirstVideo(baseFolder) == null)
             {
-                ReportTest("the loop page is missing");
+                ReportTest("no video file was found next to the player");
                 return testMode ? ExitCodes.MissingPage : ExitCodes.Ok;
             }
 
@@ -162,31 +155,6 @@ namespace Dormant
             return string.Format("{0} (0x{1:X8}): {2}", root.GetType().Name, root.HResult, message);
         }
 
-        public static string RuntimeInfo()
-        {
-            StringBuilder builder = new StringBuilder();
-            try
-            {
-                Version sdk = typeof(CoreWebView2Environment).Assembly.GetName().Version;
-                builder.Append("sdk ").Append(sdk == null ? "?" : sdk.ToString());
-            }
-            catch (Exception)
-            {
-                builder.Append("sdk ?");
-            }
-            builder.Append(", runtime ");
-            try
-            {
-                string runtime = CoreWebView2Environment.GetAvailableBrowserVersionString(null);
-                builder.Append(string.IsNullOrEmpty(runtime) ? "none" : runtime);
-            }
-            catch (Exception ex)
-            {
-                builder.Append("not found (").Append(Describe(ex)).Append(")");
-            }
-            return builder.ToString();
-        }
-
         public static void ReportTest(string detail)
         {
             if (string.IsNullOrEmpty(TestResultPath))
@@ -213,25 +181,6 @@ namespace Dormant
                 Process.Start(executable);
             }
             Environment.Exit(settled ? ExitCodes.Ok : ExitCodes.Crashed);
-        }
-
-        private static void ConfigureLoader()
-        {
-            string baseFolder = AppDomain.CurrentDomain.BaseDirectory;
-            string processArch = (Environment.GetEnvironmentVariable("PROCESSOR_ARCHITECTURE") ?? string.Empty).ToUpperInvariant();
-            string flavor = processArch == "ARM64" ? "arm64" : (Environment.Is64BitProcess ? "x64" : "x86");
-            string folder = Path.Combine(baseFolder, "runtimes", "win-" + flavor, "native");
-            if (!File.Exists(Path.Combine(folder, "WebView2Loader.dll")))
-            {
-                folder = baseFolder;
-            }
-            try
-            {
-                CoreWebView2Environment.SetLoaderDllFolderPath(folder);
-            }
-            catch (Exception)
-            {
-            }
         }
 
         private static void OnDomainException(object sender, UnhandledExceptionEventArgs e)
@@ -354,35 +303,23 @@ namespace Dormant
 
     internal static class SpecReader
     {
-        public static string Json()
+        public static List<KeyValuePair<string, string>> Pairs()
         {
-            StringBuilder builder = new StringBuilder();
-            builder.Append('{');
-            Append(builder, "cpu", Cpu());
-            builder.Append(',');
-            Append(builder, "ram", Ram());
-            builder.Append(',');
-            Append(builder, "storage", Storage());
-            builder.Append(',');
-            Append(builder, "display", Display());
-            builder.Append(',');
-            Append(builder, "os", OperatingSystem());
-            builder.Append('}');
-            return builder.ToString();
+            List<KeyValuePair<string, string>> list = new List<KeyValuePair<string, string>>();
+            AddPair(list, "CPU", Cpu());
+            AddPair(list, "RAM", Ram());
+            AddPair(list, "Disk", Storage());
+            AddPair(list, "Screen", Display());
+            AddPair(list, "OS", OperatingSystem());
+            return list;
         }
 
-        private static void Append(StringBuilder builder, string key, string value)
+        private static void AddPair(List<KeyValuePair<string, string>> list, string label, string value)
         {
-            builder.Append('"').Append(key).Append("\":\"").Append(Escape(value)).Append('"');
-        }
-
-        private static string Escape(string value)
-        {
-            if (value == null)
+            if (!string.IsNullOrEmpty(value))
             {
-                return string.Empty;
+                list.Add(new KeyValuePair<string, string>(label, value));
             }
-            return value.Replace("\\", "\\\\").Replace("\"", "\\\"").Trim();
         }
 
         private static string Cpu()
@@ -529,24 +466,72 @@ namespace Dormant
 
     internal sealed class LoopScreen
     {
-        private readonly string pageUri;
-        private readonly string dataFolder;
-        private readonly bool primary;
-        private readonly Microsoft.Web.WebView2.Wpf.WebView2 web;
-        private readonly Window window;
         private readonly LoopController owner;
+        private readonly bool primary;
+        private readonly bool testMode;
+        private readonly Window window;
+        private readonly MediaElement video;
+        private readonly string videoPath;
+        private readonly List<FrameworkElement> panels = new List<FrameworkElement>();
         private bool ready;
+        private bool broken;
+        private bool shown;
 
-        public LoopScreen(LoopController controller, string pagePath, string videoName, string dataFolder, Rect bounds, bool primary)
+        private static readonly Color Ink = Color.FromRgb(0xF4, 0xF3, 0xEF);
+
+        public LoopScreen(LoopController controller, string videoPath, Rect bounds, bool primary, bool testMode, string logoPath)
         {
             owner = controller;
             this.primary = primary;
-            this.dataFolder = dataFolder;
-            string builder = new Uri(pagePath, UriKind.Absolute).AbsoluteUri + "?v=" + Uri.EscapeDataString(videoName);
-            pageUri = builder;
+            this.testMode = testMode;
+            this.videoPath = videoPath;
 
-            web = new Microsoft.Web.WebView2.Wpf.WebView2();
-            web.DefaultBackgroundColor = System.Drawing.Color.Black;
+            double scale = bounds.Height > 0 ? bounds.Height / 1080.0 : 1.0;
+            if (scale < 0.5) { scale = 0.5; }
+
+            video = new MediaElement();
+            video.LoadedBehavior = MediaState.Manual;
+            video.UnloadedBehavior = MediaState.Manual;
+            video.Stretch = Stretch.UniformToFill;
+            video.IsMuted = true;
+            video.Volume = 0.0;
+            video.ScrubbingEnabled = false;
+            video.MediaOpened += OnMediaOpened;
+            video.MediaEnded += OnMediaEnded;
+            video.MediaFailed += OnMediaFailed;
+
+            Grid root = new Grid();
+            root.Background = Brushes.Black;
+            root.Children.Add(video);
+
+            Border shade = new Border();
+            shade.IsHitTestVisible = false;
+            LinearGradientBrush vign = new LinearGradientBrush();
+            vign.StartPoint = new Point(0.5, 0.0);
+            vign.EndPoint = new Point(0.5, 1.0);
+            vign.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0, 0, 0), 0.0));
+            vign.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0, 0, 0), 0.55));
+            vign.GradientStops.Add(new GradientStop(Color.FromArgb(0x66, 0, 0, 0), 1.0));
+            shade.Background = vign;
+            root.Children.Add(shade);
+
+            FrameworkElement specs = BuildSpecs(scale);
+            if (specs != null)
+            {
+                root.Children.Add(specs);
+                panels.Add(specs);
+            }
+
+            FrameworkElement notice = BuildNotice(scale);
+            root.Children.Add(notice);
+            panels.Add(notice);
+
+            FrameworkElement logo = BuildLogo(scale, logoPath);
+            if (logo != null)
+            {
+                root.Children.Add(logo);
+                panels.Add(logo);
+            }
 
             window = new Window();
             window.Title = "DORMANT";
@@ -563,113 +548,198 @@ namespace Dormant
             window.Topmost = true;
             window.Background = Brushes.Black;
             window.Cursor = Cursors.None;
-            window.Content = web;
+            window.Content = root;
             window.Closing += OnClosing;
+
+            foreach (FrameworkElement panel in panels)
+            {
+                panel.Opacity = 0.0;
+            }
         }
 
         public bool Ready { get { return ready; } }
-        public Window Host { get { return window; } }
 
-        public void Initialize()
+        private SolidColorBrush Faint() { return new SolidColorBrush(Color.FromArgb(0x6B, Ink.R, Ink.G, Ink.B)); }
+        private SolidColorBrush Muted() { return new SolidColorBrush(Color.FromArgb(0xAD, Ink.R, Ink.G, Ink.B)); }
+        private SolidColorBrush Line() { return new SolidColorBrush(Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF)); }
+
+        private Border Card(double scale)
         {
-            InitializeAsync();
+            Border card = new Border();
+            card.Background = new SolidColorBrush(Color.FromArgb(0xB8, 0x09, 0x09, 0x0B));
+            card.BorderBrush = Line();
+            card.BorderThickness = new Thickness(1);
+            card.Effect = new DropShadowEffect { BlurRadius = 34 * scale, ShadowDepth = 12 * scale, Direction = 270, Opacity = 0.45, Color = Colors.Black };
+            return card;
         }
 
-        private async void InitializeAsync()
+        private TextBlock Mono(string text, double size, Brush brush)
         {
+            TextBlock block = new TextBlock();
+            block.Text = text;
+            block.FontFamily = new FontFamily("Cascadia Mono, Consolas, Courier New");
+            block.FontSize = size;
+            block.Foreground = brush;
+            block.TextWrapping = TextWrapping.NoWrap;
+            return block;
+        }
+
+        private TextBlock Sans(string text, double size, Brush brush, FontWeight weight)
+        {
+            TextBlock block = new TextBlock();
+            block.Text = text;
+            block.FontFamily = new FontFamily("Segoe UI, Arial");
+            block.FontSize = size;
+            block.FontWeight = weight;
+            block.Foreground = brush;
+            block.TextWrapping = TextWrapping.Wrap;
+            return block;
+        }
+
+        private FrameworkElement BuildSpecs(double scale)
+        {
+            List<KeyValuePair<string, string>> pairs = SpecReader.Pairs();
+            if (pairs.Count == 0)
+            {
+                return null;
+            }
+            StackPanel stack = new StackPanel();
+
+            TextBlock head = Mono("THIS MACHINE", 11 * scale, Faint());
+            head.Margin = new Thickness(0, 0, 0, 9 * scale);
+            stack.Children.Add(head);
+
+            Border rule = new Border();
+            rule.Height = 1;
+            rule.Background = Line();
+            rule.Margin = new Thickness(0, 0, 0, 9 * scale);
+            stack.Children.Add(rule);
+
+            Grid grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            for (int i = 0; i < pairs.Count; i++)
+            {
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+                TextBlock label = Mono(pairs[i].Key.ToUpperInvariant(), 10.5 * scale, Faint());
+                label.Margin = new Thickness(0, i == 0 ? 0 : 5 * scale, 14 * scale, 0);
+                Grid.SetRow(label, i);
+                Grid.SetColumn(label, 0);
+                grid.Children.Add(label);
+
+                TextBlock value = Sans(pairs[i].Value, 14 * scale, new SolidColorBrush(Ink), FontWeights.Normal);
+                value.Margin = new Thickness(0, i == 0 ? 0 : 5 * scale, 0, 0);
+                Grid.SetRow(value, i);
+                Grid.SetColumn(value, 1);
+                grid.Children.Add(value);
+            }
+            stack.Children.Add(grid);
+
+            Border card = Card(scale);
+            card.Padding = new Thickness(18 * scale, 15 * scale, 20 * scale, 16 * scale);
+            card.MinWidth = 210 * scale;
+            card.MaxWidth = 340 * scale;
+            card.HorizontalAlignment = HorizontalAlignment.Left;
+            card.VerticalAlignment = VerticalAlignment.Top;
+            card.Margin = new Thickness(40 * scale, 40 * scale, 0, 0);
+            card.Child = stack;
+            return card;
+        }
+
+        private FrameworkElement BuildNotice(double scale)
+        {
+            StackPanel stack = new StackPanel();
+
+            DockPanel meta = new DockPanel();
+            meta.Margin = new Thickness(0, 0, 0, 11 * scale);
+            TextBlock brand = Mono("AG LIQUIDATION", 11 * scale, Muted());
+            DockPanel.SetDock(brand, Dock.Left);
+            meta.Children.Add(brand);
+
+            StackPanel state = new StackPanel();
+            state.Orientation = Orientation.Horizontal;
+            state.HorizontalAlignment = HorizontalAlignment.Right;
+            Border dot = new Border();
+            dot.Width = 7 * scale;
+            dot.Height = 7 * scale;
+            dot.Background = new SolidColorBrush(Ink);
+            dot.Margin = new Thickness(0, 0, 8 * scale, 0);
+            dot.VerticalAlignment = VerticalAlignment.Center;
+            DoubleAnimation pulse = new DoubleAnimation(1.0, 0.25, new Duration(TimeSpan.FromMilliseconds(1200)));
+            pulse.AutoReverse = true;
+            pulse.RepeatBehavior = RepeatBehavior.Forever;
+            dot.BeginAnimation(UIElement.OpacityProperty, pulse);
+            state.Children.Add(dot);
+            state.Children.Add(Mono("READY TO USE", 11 * scale, Faint()));
+            meta.Children.Add(state);
+            stack.Children.Add(meta);
+
+            Border rule = new Border();
+            rule.Height = 1;
+            rule.Background = Line();
+            rule.Margin = new Thickness(0, 0, 0, 13 * scale);
+            stack.Children.Add(rule);
+
+            TextBlock title = Sans("Ready when you are.", 29 * scale, new SolidColorBrush(Ink), FontWeights.SemiBold);
+            title.Margin = new Thickness(0, 0, 0, 11 * scale);
+            stack.Children.Add(title);
+
+            TextBlock line1 = Sans("Every computer here comes with its programs fully installed and permanently activated.", 16 * scale, Muted(), FontWeights.Normal);
+            line1.Margin = new Thickness(0, 0, 0, 7 * scale);
+            line1.LineHeight = 23 * scale;
+            stack.Children.Add(line1);
+
+            TextBlock line2 = Sans("Need a program that isn't included? Please ask any AG Liquidation team member. We'll be glad to help.", 16 * scale, Muted(), FontWeights.Normal);
+            line2.LineHeight = 23 * scale;
+            stack.Children.Add(line2);
+
+            Border rule2 = new Border();
+            rule2.Height = 1;
+            rule2.Background = Line();
+            rule2.Margin = new Thickness(0, 15 * scale, 0, 12 * scale);
+            stack.Children.Add(rule2);
+
+            stack.Children.Add(Sans("Thank you for shopping with us.", 13 * scale, Faint(), FontWeights.Normal));
+
+            Border card = Card(scale);
+            card.Padding = new Thickness(22 * scale, 20 * scale, 24 * scale, 20 * scale);
+            card.Width = 470 * scale;
+            card.HorizontalAlignment = HorizontalAlignment.Left;
+            card.VerticalAlignment = VerticalAlignment.Bottom;
+            card.Margin = new Thickness(40 * scale, 0, 0, 40 * scale);
+            card.Child = stack;
+            return card;
+        }
+
+        private FrameworkElement BuildLogo(double scale, string logoPath)
+        {
+            if (string.IsNullOrEmpty(logoPath) || !File.Exists(logoPath))
+            {
+                return null;
+            }
             try
             {
-                CoreWebView2EnvironmentOptions options = new CoreWebView2EnvironmentOptions();
-                options.AdditionalBrowserArguments = "--autoplay-policy=no-user-gesture-required";
-                CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(null, dataFolder, options);
-                await web.EnsureCoreWebView2Async(environment);
+                BitmapImage source = new BitmapImage();
+                source.BeginInit();
+                source.CacheOption = BitmapCacheOption.OnLoad;
+                source.UriSource = new Uri(logoPath, UriKind.Absolute);
+                source.EndInit();
+                source.Freeze();
 
-                CoreWebView2Settings settings = web.CoreWebView2.Settings;
-                settings.AreDevToolsEnabled = false;
-                settings.AreDefaultContextMenusEnabled = false;
-                settings.AreDefaultScriptDialogsEnabled = false;
-                settings.IsStatusBarEnabled = false;
-                settings.IsZoomControlEnabled = false;
-                settings.IsWebMessageEnabled = true;
-                try
-                {
-                    settings.AreBrowserAcceleratorKeysEnabled = false;
-                }
-                catch (Exception)
-                {
-                }
-
-                web.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
-                web.CoreWebView2.ProcessFailed += OnProcessFailed;
-                web.CoreWebView2.WebMessageReceived += OnWebMessage;
-                web.CoreWebView2.Navigate(pageUri);
-            }
-            catch (Exception error)
-            {
-                owner.OnScreenFailed(ExitCodes.InitFailed, Program.Describe(error) + " | " + Program.RuntimeInfo());
-            }
-        }
-
-        private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
-        {
-            if (!e.IsSuccess)
-            {
-                owner.OnScreenFailed(ExitCodes.NavigationFailed, "navigation status: " + e.WebErrorStatus);
-                return;
-            }
-            ready = true;
-            owner.OnScreenReady(this);
-        }
-
-        private void OnProcessFailed(object sender, CoreWebView2ProcessFailedEventArgs e)
-        {
-            if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
-            {
-                owner.OnScreenFailed(ExitCodes.Crashed, "browser process exited");
-                return;
-            }
-            if (e.ProcessFailedKind != CoreWebView2ProcessFailedKind.RenderProcessExited &&
-                e.ProcessFailedKind != CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
-            {
-                return;
-            }
-            ready = false;
-            try
-            {
-                web.CoreWebView2.Reload();
-            }
-            catch (Exception error)
-            {
-                owner.OnScreenFailed(ExitCodes.Crashed, Program.Describe(error));
-            }
-        }
-
-        private void OnWebMessage(object sender, CoreWebView2WebMessageReceivedEventArgs e)
-        {
-            string message;
-            try
-            {
-                message = e.TryGetWebMessageAsString();
+                Image image = new Image();
+                image.Source = source;
+                image.Stretch = Stretch.Uniform;
+                image.Width = 300 * scale;
+                image.HorizontalAlignment = HorizontalAlignment.Right;
+                image.VerticalAlignment = VerticalAlignment.Bottom;
+                image.Margin = new Thickness(0, 0, 44 * scale, 44 * scale);
+                image.Effect = new DropShadowEffect { BlurRadius = 24 * scale, ShadowDepth = 6 * scale, Direction = 270, Opacity = 0.75, Color = Colors.Black };
+                return image;
             }
             catch (Exception)
             {
-                return;
-            }
-            owner.OnScreenMessage(message);
-        }
-
-        public void Run(string script)
-        {
-            if (!ready || web.CoreWebView2 == null)
-            {
-                return;
-            }
-            try
-            {
-                web.CoreWebView2.ExecuteScriptAsync(script);
-            }
-            catch (Exception)
-            {
+                return null;
             }
         }
 
@@ -693,6 +763,72 @@ namespace Dormant
             window.Hide();
         }
 
+        public void Start()
+        {
+            if (video.Source == null)
+            {
+                try
+                {
+                    video.Source = new Uri(videoPath, UriKind.Absolute);
+                }
+                catch (Exception error)
+                {
+                    owner.OnScreenFailed(ExitCodes.VideoFailed, Program.Describe(error));
+                    return;
+                }
+            }
+        }
+
+        public void Play()
+        {
+            if (broken)
+            {
+                return;
+            }
+            try
+            {
+                video.Position = TimeSpan.Zero;
+                video.Play();
+            }
+            catch (Exception)
+            {
+            }
+            Reveal();
+        }
+
+        public void Pause()
+        {
+            try
+            {
+                video.Pause();
+            }
+            catch (Exception)
+            {
+            }
+            Conceal();
+        }
+
+        public void Ensure()
+        {
+            Raise();
+            if (broken)
+            {
+                return;
+            }
+            if (!shown)
+            {
+                Play();
+                return;
+            }
+            try
+            {
+                video.Play();
+            }
+            catch (Exception)
+            {
+            }
+        }
+
         public void Raise()
         {
             if (window.IsVisible)
@@ -700,6 +836,68 @@ namespace Dormant
                 window.Topmost = false;
                 window.Topmost = true;
             }
+        }
+
+        private void Reveal()
+        {
+            shown = true;
+            foreach (FrameworkElement panel in panels)
+            {
+                Fade(panel, 1.0, 900);
+            }
+        }
+
+        private void Conceal()
+        {
+            shown = false;
+            foreach (FrameworkElement panel in panels)
+            {
+                panel.BeginAnimation(UIElement.OpacityProperty, null);
+                panel.Opacity = 0.0;
+            }
+        }
+
+        private void Fade(FrameworkElement target, double to, int ms)
+        {
+            DoubleAnimation animation = new DoubleAnimation(to, new Duration(TimeSpan.FromMilliseconds(ms)));
+            animation.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
+            target.BeginAnimation(UIElement.OpacityProperty, animation);
+        }
+
+        private void OnMediaOpened(object sender, RoutedEventArgs e)
+        {
+            ready = true;
+            owner.OnScreenReady(this);
+        }
+
+        private void OnMediaEnded(object sender, RoutedEventArgs e)
+        {
+            if (broken)
+            {
+                return;
+            }
+            try
+            {
+                video.Position = TimeSpan.Zero;
+                video.Play();
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        private void OnMediaFailed(object sender, ExceptionRoutedEventArgs e)
+        {
+            broken = true;
+            try
+            {
+                video.Visibility = Visibility.Hidden;
+            }
+            catch (Exception)
+            {
+            }
+            string detail = e != null && e.ErrorException != null ? Program.Describe(e.ErrorException) : "the video could not be decoded";
+            owner.OnScreenFailed(ExitCodes.VideoFailed, detail);
         }
 
         private void OnClosing(object sender, CancelEventArgs e)
@@ -714,12 +912,12 @@ namespace Dormant
         private const uint IdleThresholdMs = 30000;
         private const int EnsureEveryTicks = 4;
         private const uint ResumeDebounceMs = 10000;
+        private static readonly string[] Formats = new string[] { ".mp4", ".m4v", ".mov" };
 
         private readonly bool testMode;
         private readonly string baseFolder;
         private readonly string nightFlag;
         private readonly string indexPath;
-        private readonly string specsJson;
         private readonly Dispatcher dispatcher;
         private readonly List<LoopScreen> screens = new List<LoopScreen>();
         private readonly DispatcherTimer poll;
@@ -732,7 +930,6 @@ namespace Dormant
         private bool resumeSeen;
         private bool nightMode;
         private bool pageOpenedThisCycle;
-        private bool testPassed;
         private uint lastResumeTick;
         private uint inputAtShow;
         private int showTicks;
@@ -745,22 +942,16 @@ namespace Dormant
             this.testMode = testMode;
             nightFlag = Path.Combine(baseFolder, "night.flag");
             indexPath = Path.Combine(baseFolder, "web", "index.html");
-            specsJson = SpecReader.Json();
             dispatcher = Dispatcher.CurrentDispatcher;
 
-            string page = Path.Combine(baseFolder, "loop.html");
-            string videosRaw = ReadConfig("videos.txt");
-            string[] videoList = videosRaw.Length > 0
-                ? videosRaw.Split(new char[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                : new string[] { "loop.mp4" };
-
+            string[] videoList = VideoList(baseFolder);
+            string logoPath = Path.Combine(baseFolder, "logo.png");
             Rect[] areas = ScreenAreas();
-            string dataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DORMANT", "WebView2");
             for (int index = 0; index < areas.Length; index++)
             {
-                string videoName = index < videoList.Length ? videoList[index].Trim() : videoList[videoList.Length - 1].Trim();
-                string dataFolder = Path.Combine(dataRoot, "screen" + index.ToString(CultureInfo.InvariantCulture));
-                LoopScreen screen = new LoopScreen(this, page, videoName, dataFolder, areas[index], index == 0);
+                string name = index < videoList.Length ? videoList[index] : videoList[videoList.Length - 1];
+                string videoPath = Path.Combine(baseFolder, name);
+                LoopScreen screen = new LoopScreen(this, videoPath, areas[index], index == 0, testMode, logoPath);
                 screens.Add(screen);
             }
 
@@ -781,7 +972,7 @@ namespace Dormant
 
             foreach (LoopScreen screen in screens)
             {
-                screen.Initialize();
+                screen.Start();
             }
 
             if (testMode)
@@ -795,6 +986,63 @@ namespace Dormant
             }
         }
 
+        public static string FirstVideo(string baseFolder)
+        {
+            string[] list = VideoList(baseFolder);
+            if (list.Length > 0)
+            {
+                string candidate = Path.Combine(baseFolder, list[0]);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        private static string[] VideoList(string baseFolder)
+        {
+            try
+            {
+                string config = Path.Combine(baseFolder, "videos.txt");
+                if (File.Exists(config))
+                {
+                    string raw = File.ReadAllText(config);
+                    string[] parsed = raw.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> names = new List<string>();
+                    foreach (string entry in parsed)
+                    {
+                        string trimmed = entry.Trim();
+                        if (trimmed.Length > 0)
+                        {
+                            names.Add(trimmed);
+                        }
+                    }
+                    if (names.Count > 0)
+                    {
+                        return names.ToArray();
+                    }
+                }
+            }
+            catch (Exception)
+            {
+            }
+            try
+            {
+                foreach (string format in Formats)
+                {
+                    foreach (string file in Directory.GetFiles(baseFolder, "loop" + format))
+                    {
+                        return new string[] { Path.GetFileName(file) };
+                    }
+                }
+            }
+            catch (Exception)
+            {
+            }
+            return new string[] { "loop.mp4" };
+        }
+
         private void ShowLoopForTest()
         {
             ShowLoop(Native.LastInputTick());
@@ -806,22 +1054,6 @@ namespace Dormant
             timer.Interval = interval;
             timer.Tick += handler;
             return timer;
-        }
-
-        private string ReadConfig(string name)
-        {
-            try
-            {
-                string path = Path.Combine(baseFolder, name);
-                if (File.Exists(path))
-                {
-                    return File.ReadAllText(path);
-                }
-            }
-            catch (Exception)
-            {
-            }
-            return string.Empty;
         }
 
         private Rect[] ScreenAreas()
@@ -878,10 +1110,14 @@ namespace Dormant
         public void OnScreenReady(LoopScreen screen)
         {
             readyCount++;
-            screen.Run("window.dormant && window.dormant.setSpecs(" + specsJson + ")");
             if (showing)
             {
-                screen.Run("window.dormant && window.dormant.show()");
+                screen.Play();
+            }
+            if (testMode && !testFinish.IsEnabled)
+            {
+                testDeadline.Stop();
+                testFinish.Start();
             }
         }
 
@@ -904,25 +1140,6 @@ namespace Dormant
             }
         }
 
-        public void OnScreenMessage(string message)
-        {
-            if (!testMode)
-            {
-                return;
-            }
-            if (message == "playing" && !testFinish.IsEnabled)
-            {
-                testPassed = true;
-                testDeadline.Stop();
-                testFinish.Start();
-            }
-            else if (message == "error")
-            {
-                Program.ReportTest("this PC cannot play this video file. an H.264 .mp4 is the safest choice");
-                Environment.Exit(ExitCodes.VideoFailed);
-            }
-        }
-
         public void RequestHide()
         {
             if (showing)
@@ -940,7 +1157,7 @@ namespace Dormant
         private void OnTestDeadline(object sender, EventArgs e)
         {
             testDeadline.Stop();
-            Program.ReportTest(readyCount > 0 ? "the page loaded but the video never started" : "the player engine did not finish loading");
+            Program.ReportTest(readyCount > 0 ? "the page loaded but the video never started" : "the video engine did not start");
             Environment.Exit(ExitCodes.TimedOut);
         }
 
@@ -1000,8 +1217,7 @@ namespace Dormant
                 {
                     foreach (LoopScreen screen in screens)
                     {
-                        screen.Raise();
-                        screen.Run("window.dormant && window.dormant.ensure()");
+                        screen.Ensure();
                     }
                 }
                 return;
@@ -1033,7 +1249,7 @@ namespace Dormant
             foreach (LoopScreen screen in screens)
             {
                 screen.ShowWindow();
-                screen.Run("window.dormant && window.dormant.show()");
+                screen.Play();
             }
         }
 
@@ -1042,7 +1258,7 @@ namespace Dormant
             showing = false;
             foreach (LoopScreen screen in screens)
             {
-                screen.Run("window.dormant && window.dormant.hide()");
+                screen.Pause();
                 screen.HideWindow();
             }
             IntPtr target = previousForeground;
@@ -1085,7 +1301,7 @@ namespace Dormant
             catch (Exception)
             {
             }
-            string[] keep = new string[] { ownName, "explorer", "dwm", "textinputhost", "searchhost", "shellexperiencehost", "startmenuexperiencehost", "applicationframehost", "systemsettings", "lockapp", "msedgewebview2" };
+            string[] keep = new string[] { ownName, "explorer", "dwm", "textinputhost", "searchhost", "shellexperiencehost", "startmenuexperiencehost", "applicationframehost", "systemsettings", "lockapp" };
             Process[] all;
             try
             {
@@ -1162,267 +1378,6 @@ namespace Dormant
 }
 '@
 
-$script:PageTemplate = @'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DORMANT</title>
-<style>
-:root {
-  --unit: 1.05vw;
-  --ink: #f4f3ef;
-  --muted: rgba(244, 243, 239, 0.68);
-  --faint: rgba(244, 243, 239, 0.42);
-  --line: rgba(255, 255, 255, 0.14);
-  --panel: rgba(9, 9, 11, 0.70);
-  --ease: cubic-bezier(0.16, 0.84, 0.24, 1);
-}
-@media (max-width: 1238px) { :root { --unit: 13px; } }
-@media (min-width: 2477px) { :root { --unit: 26px; } }
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #000; cursor: none; -webkit-user-select: none; user-select: none; }
-#loop { position: fixed; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
-.shade { position: fixed; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; background:
-  radial-gradient(ellipse 60% 55% at 0% 100%, rgba(0, 0, 0, 0.52) 0%, rgba(0, 0, 0, 0) 68%),
-  radial-gradient(ellipse 55% 50% at 100% 100%, rgba(0, 0, 0, 0.48) 0%, rgba(0, 0, 0, 0) 66%),
-  radial-gradient(ellipse 45% 45% at 0% 0%, rgba(0, 0, 0, 0.46) 0%, rgba(0, 0, 0, 0) 62%); }
-
-.panel {
-  position: fixed;
-  color: var(--ink);
-  opacity: 0;
-  transform: translateY(calc(var(--unit) * 0.9));
-  transition: opacity 900ms var(--ease), transform 900ms var(--ease);
-  font-family: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
-}
-.panel.in { opacity: 1; transform: translateY(0); }
-
-.notice {
-  left: calc(var(--unit) * 2.4);
-  bottom: calc(var(--unit) * 2.4);
-  width: calc(var(--unit) * 23);
-  max-width: calc(52vw - var(--unit) * 3);
-  padding: calc(var(--unit) * 1.1) calc(var(--unit) * 1.25) calc(var(--unit) * 1);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: 0 calc(var(--unit) * 1.2) calc(var(--unit) * 3) rgba(0, 0, 0, 0.45);
-}
-.notice.in { transition-delay: 500ms; }
-.notice::before { content: ""; position: absolute; top: -1px; bottom: -1px; left: -1px; width: 2px; background: var(--ink); }
-.notice::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; opacity: 0.06; mix-blend-mode: overlay; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>"); }
-.meta { display: flex; justify-content: space-between; align-items: center; padding-bottom: calc(var(--unit) * 0.7); margin-bottom: calc(var(--unit) * 0.85); border-bottom: 1px solid var(--line); font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace; font-size: calc(var(--unit) * 0.56); letter-spacing: 0.24em; color: var(--faint); white-space: nowrap; }
-.brand { color: var(--muted); margin-right: var(--unit); }
-.state { display: inline-flex; align-items: center; }
-.state i { display: inline-block; width: 0.55em; height: 0.55em; margin-right: 0.8em; background: var(--ink); animation: pulse 2.4s ease-in-out infinite; }
-.notice h1 { font-size: calc(var(--unit) * 1.2); font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: calc(var(--unit) * 0.55); }
-.notice p { font-size: calc(var(--unit) * 0.8); line-height: 1.5; color: var(--muted); }
-.notice p + p { margin-top: calc(var(--unit) * 0.4); }
-.notice strong { color: var(--ink); font-weight: 600; }
-.notice footer { margin-top: calc(var(--unit) * 0.85); padding-top: calc(var(--unit) * 0.7); border-top: 1px solid var(--line); font-size: calc(var(--unit) * 0.66); letter-spacing: 0.02em; color: var(--faint); }
-
-.mark {
-  right: calc(var(--unit) * 2.4);
-  bottom: calc(var(--unit) * 2.4);
-  width: calc(var(--unit) * 13);
-  max-width: calc(40vw - var(--unit) * 2.4);
-}
-.mark.in { transition-delay: 700ms; }
-.mark.missing { display: none; }
-.mark img { display: block; width: 100%; height: auto; filter: drop-shadow(0 calc(var(--unit) * 0.25) calc(var(--unit) * 0.7) rgba(0, 0, 0, 0.75)) drop-shadow(0 0 calc(var(--unit) * 1.4) rgba(0, 0, 0, 0.55)); }
-
-.specs {
-  left: calc(var(--unit) * 2.4);
-  top: calc(var(--unit) * 2.4);
-  min-width: calc(var(--unit) * 14);
-  max-width: calc(var(--unit) * 20);
-  padding: calc(var(--unit) * 0.85) calc(var(--unit) * 1.05) calc(var(--unit) * 0.9);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: 0 calc(var(--unit) * 1.2) calc(var(--unit) * 3) rgba(0, 0, 0, 0.45);
-}
-.specs.in { transition-delay: 600ms; }
-.specs.empty { display: none; }
-.specs::before { content: ""; position: absolute; top: -1px; bottom: -1px; left: -1px; width: 2px; background: var(--ink); }
-.specs .head { font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace; font-size: calc(var(--unit) * 0.52); letter-spacing: 0.24em; color: var(--faint); padding-bottom: calc(var(--unit) * 0.6); margin-bottom: calc(var(--unit) * 0.6); border-bottom: 1px solid var(--line); }
-.specs dl { display: grid; grid-template-columns: auto 1fr; gap: calc(var(--unit) * 0.3) calc(var(--unit) * 0.9); }
-.specs dt { font-family: "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace; font-size: calc(var(--unit) * 0.52); letter-spacing: 0.1em; color: var(--faint); text-transform: uppercase; align-self: baseline; }
-.specs dd { font-size: calc(var(--unit) * 0.72); line-height: 1.3; color: var(--ink); }
-
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-</style>
-</head>
-<body>
-<video id="loop" loop muted playsinline preload="auto" disablepictureinpicture disableremoteplayback></video>
-<div class="shade"></div>
-
-<aside class="specs empty panel" id="specs">
-  <div class="head">THIS MACHINE</div>
-  <dl id="specsList"></dl>
-</aside>
-
-<aside class="notice panel" id="notice">
-  <div class="meta"><span class="brand">AG LIQUIDATION</span><span class="state"><i></i>READY TO USE</span></div>
-  <h1>Ready when you are.</h1>
-  <p>Every computer here comes with its programs fully installed and permanently activated.</p>
-  <p>Need a program that isn't included? Please ask any <strong>AG Liquidation</strong> team member. We'll be glad to help.</p>
-  <footer>Thank you for shopping with us.</footer>
-</aside>
-
-<div class="mark panel" id="mark"><img id="markImage" src="logo.png" alt="AG Liquidation"></div>
-
-<script>
-(function () {
-  var SPEC_ORDER = ['cpu', 'ram', 'storage', 'display', 'os'];
-  var SPEC_LABEL = { cpu: 'CPU', ram: 'RAM', storage: 'Disk', display: 'Screen', os: 'OS' };
-  var video = document.getElementById('loop');
-  var notice = document.getElementById('notice');
-  var mark = document.getElementById('mark');
-  var markImage = document.getElementById('markImage');
-  var specs = document.getElementById('specs');
-  var specsList = document.getElementById('specsList');
-  var panels = [specs, notice, mark];
-  var broken = false;
-
-  function videoName() {
-    var query = window.location.search || '';
-    var match = query.match(/[?&]v=([^&]+)/);
-    if (match) {
-      try {
-        return decodeURIComponent(match[1]);
-      } catch (error) {
-        return match[1];
-      }
-    }
-    return 'loop.mp4';
-  }
-
-  function report(state) {
-    try {
-      document.title = 'dormant:' + state;
-    } catch (error) {
-    }
-    try {
-      if (window.chrome && window.chrome.webview) {
-        window.chrome.webview.postMessage(state);
-      }
-    } catch (error) {
-    }
-  }
-
-  function play() {
-    if (broken) {
-      return;
-    }
-    var attempt = video.play();
-    if (attempt && typeof attempt.catch === 'function') {
-      attempt.catch(function () {});
-    }
-  }
-
-  function conceal() {
-    for (var index = 0; index < panels.length; index += 1) {
-      panels[index].style.transition = 'none';
-      panels[index].classList.remove('in');
-    }
-  }
-
-  function reveal() {
-    conceal();
-    void notice.offsetWidth;
-    for (var index = 0; index < panels.length; index += 1) {
-      panels[index].style.transition = '';
-      panels[index].classList.add('in');
-    }
-  }
-
-  function escapeText(value) {
-    return String(value).replace(/[&<>]/g, function (character) {
-      if (character === '&') { return '&amp;'; }
-      if (character === '<') { return '&lt;'; }
-      return '&gt;';
-    });
-  }
-
-  function applySpecs(data) {
-    if (!data || typeof data !== 'object') {
-      return;
-    }
-    var rows = '';
-    for (var index = 0; index < SPEC_ORDER.length; index += 1) {
-      var key = SPEC_ORDER[index];
-      var value = data[key];
-      if (value === undefined || value === null || String(value).length === 0) {
-        continue;
-      }
-      rows += '<dt>' + SPEC_LABEL[key] + '</dt><dd>' + escapeText(value) + '</dd>';
-    }
-    if (rows.length === 0) {
-      return;
-    }
-    specsList.innerHTML = rows;
-    specs.classList.remove('empty');
-    if (notice.classList.contains('in')) {
-      specs.classList.add('in');
-    }
-  }
-
-  markImage.addEventListener('error', function () {
-    mark.classList.add('missing');
-  });
-  video.addEventListener('playing', function () {
-    report('playing');
-  });
-  video.addEventListener('error', function () {
-    broken = true;
-    video.style.visibility = 'hidden';
-    report('error');
-  });
-
-  video.src = videoName();
-
-  window.dormant = {
-    setSpecs: function (data) {
-      try {
-        applySpecs(typeof data === 'string' ? JSON.parse(data) : data);
-      } catch (error) {
-      }
-    },
-    show: function () {
-      if (!broken) {
-        try {
-          video.currentTime = 0;
-        } catch (error) {
-        }
-      }
-      play();
-      reveal();
-    },
-    hide: function () {
-      video.pause();
-      conceal();
-    },
-    ensure: function () {
-      if (!notice.classList.contains('in')) {
-        this.show();
-        return;
-      }
-      if (video.paused && !broken) {
-        play();
-      }
-    }
-  };
-})();
-</script>
-</body>
-</html>
-'@
-
 function Initialize-Console {
     try {
         $raw = $Host.UI.RawUI
@@ -1465,7 +1420,7 @@ function Show-Banner {
     Write-Line ('  WAKE    mon-sat {0}    sun {1}' -f $script:WakeWeek, $script:WakeSunday)
     Write-Line ('  SLEEP   mon-sat {0}    sun {1}' -f $script:SleepWeek, $script:SleepSunday)
     Write-Line '  LOOP    after 30s of no input'
-    Write-Line '  VIDEO   mp4 / mov / m4v / webm'
+    Write-Line '  VIDEO   mp4 / mov / m4v'
     Write-Rule
     Write-Line
 }
@@ -1536,18 +1491,6 @@ function Invoke-Native {
     }
 }
 
-function Invoke-Download {
-    param(
-        [Parameter(Mandatory = $true)][string]$Uri,
-        [Parameter(Mandatory = $true)][string]$OutFile
-    )
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
-    if (-not (Test-Path -LiteralPath $OutFile) -or (Get-Item -LiteralPath $OutFile).Length -le 0) {
-        throw ('download failed: {0}' -f $Uri)
-    }
-}
-
 function Get-MonitorCount {
     Add-Type -AssemblyName System.Windows.Forms
     try {
@@ -1567,7 +1510,7 @@ function Select-OneVideo {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Title = $Prompt
     $dialog.InitialDirectory = [Environment]::GetFolderPath('Desktop')
-    $dialog.Filter = 'Video (*.mp4;*.mov;*.m4v;*.webm)|*.mp4;*.mov;*.m4v;*.webm'
+    $dialog.Filter = 'Video (*.mp4;*.mov;*.m4v)|*.mp4;*.mov;*.m4v'
     $dialog.Multiselect = $false
     $dialog.CheckFileExists = $true
     $dialog.RestoreDirectory = $true
@@ -1628,7 +1571,7 @@ function Initialize-Root {
     if (-not (Test-Path -LiteralPath $script:Root)) {
         New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
     }
-    foreach ($pattern in @('loop*.mp4', 'loop*.mov', 'loop*.m4v', 'loop*.webm', 'logo.*', 'wallpaper.*', 'wallpaper-ultrawide.*', 'videos.txt', 'night.flag')) {
+    foreach ($pattern in @('loop*.mp4', 'loop*.mov', 'loop*.m4v', 'logo.*', 'wallpaper.*', 'wallpaper-ultrawide.*', 'videos.txt', 'night.flag')) {
         Get-ChildItem -LiteralPath $script:Root -Filter $pattern -File -ErrorAction SilentlyContinue | Remove-Item -Force
     }
     $webTarget = Join-Path $script:Root 'web'
@@ -1778,259 +1721,6 @@ function Remove-SelfLater {
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList $command -WindowStyle Hidden
 }
 
-function Write-Page {
-    [System.IO.File]::WriteAllText($script:PagePath, $script:PageTemplate, (New-Object System.Text.UTF8Encoding($false)))
-}
-
-function Get-WebView2RuntimeVersion {
-    $paths = @(
-        ('HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{0}' -f $script:WebView2Id),
-        ('HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{0}' -f $script:WebView2Id),
-        ('HKCU:\Software\Microsoft\EdgeUpdate\Clients\{0}' -f $script:WebView2Id)
-    )
-    $best = $null
-    foreach ($path in $paths) {
-        $item = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
-        if ($item -and $item.PSObject.Properties['pv']) {
-            $raw = [string]$item.pv
-            if ($raw -and $raw -ne '0.0.0.0') {
-                $parsed = $null
-                if ([Version]::TryParse($raw, [ref]$parsed)) {
-                    if (-not $best -or $parsed -gt $best) {
-                        $best = $parsed
-                    }
-                }
-            }
-        }
-    }
-    return $best
-}
-
-function Test-WebView2Runtime {
-    return $null -ne (Get-WebView2RuntimeVersion)
-}
-
-function Install-WebView2Runtime {
-    $setup = Join-Path $env:TEMP 'MicrosoftEdgeWebview2Setup.exe'
-    Invoke-Download -Uri $script:WebView2Setup -OutFile $setup
-    try {
-        Start-Process -FilePath $setup -ArgumentList '/silent', '/install' -Wait | Out-Null
-    }
-    finally {
-        Remove-Item -LiteralPath $setup -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Confirm-WebView2Runtime {
-    $required = [Version]$script:WebView2SdkVer
-    $installed = Get-WebView2RuntimeVersion
-    if ($installed -and $installed -ge $required) {
-        return
-    }
-    Install-WebView2Runtime
-    $installed = Get-WebView2RuntimeVersion
-    if (-not $installed) {
-        throw 'the WebView2 runtime could not be installed'
-    }
-    if ($installed -lt $required) {
-        throw ('the WebView2 runtime on this PC is {0}, older than the {1} this build needs. connect to the internet and run the installer again so Windows can update it.' -f $installed, $required)
-    }
-}
-
-function Get-LoaderArchitecture {
-    $os = $null
-    try {
-        $os = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-    }
-    catch {
-    }
-    if ($os -eq 'Arm64') {
-        return 'arm64'
-    }
-    if ([Environment]::Is64BitOperatingSystem) {
-        return 'x64'
-    }
-    return 'x86'
-}
-
-function Test-SdkPackage {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-    try {
-        $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
-    }
-    catch {
-        return $false
-    }
-    try {
-        $core = @($archive.Entries | Where-Object { $_.FullName -match '^lib/net4[0-9]*/Microsoft\.Web\.WebView2\.Core\.dll$' })
-        if ($core.Count -le 0) {
-            return $false
-        }
-        $spec = $archive.Entries | Where-Object { $_.FullName -match '(?i)\.nuspec$' } | Select-Object -First 1
-        if (-not $spec) {
-            return $false
-        }
-        $reader = New-Object System.IO.StreamReader($spec.Open())
-        try {
-            $text = $reader.ReadToEnd()
-        }
-        finally {
-            $reader.Dispose()
-        }
-        $match = [regex]::Match($text, '<version>\s*([^<\s]+)\s*</version>')
-        if (-not $match.Success) {
-            return $false
-        }
-        return $match.Groups[1].Value -eq $script:WebView2SdkVer
-    }
-    finally {
-        $archive.Dispose()
-    }
-}
-
-function Get-DownloadProblem {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        try {
-            $buffer = New-Object byte[] 64
-            $count = $stream.Read($buffer, 0, $buffer.Length)
-        }
-        finally {
-            $stream.Dispose()
-        }
-        $head = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $count).TrimStart()
-        if ($head.StartsWith('<')) {
-            return 'the network sent a web page instead of the file (public WiFi login page?). finish the WiFi login or use another network, then run the installer again.'
-        }
-    }
-    catch {
-    }
-    return 'the download came back incomplete. check the internet connection and run the installer again.'
-}
-
-function Test-SdkInstalled {
-    $architecture = Get-LoaderArchitecture
-    $required = @()
-    foreach ($name in $script:SdkFiles) {
-        $required += (Join-Path $script:Root $name)
-    }
-    $required += (Join-Path $script:Root 'WebView2Loader.dll')
-    $required += (Join-Path $script:Root ('runtimes\win-{0}\native\WebView2Loader.dll' -f $architecture))
-    foreach ($file in $required) {
-        if (-not (Test-Path -LiteralPath $file) -or (Get-Item -LiteralPath $file).Length -le 0) {
-            return $false
-        }
-    }
-    foreach ($name in $script:SdkFiles) {
-        try {
-            [void][System.Reflection.AssemblyName]::GetAssemblyName((Join-Path $script:Root $name))
-        }
-        catch {
-            return $false
-        }
-    }
-    return $true
-}
-
-function Get-WebView2Package {
-    $cached = Find-UsbAsset -RelativePaths $script:CachePaths
-    if ($cached) {
-        if (Test-SdkPackage -Path $cached) {
-            return $cached
-        }
-        Remove-Item -LiteralPath $cached -Force -ErrorAction SilentlyContinue
-    }
-
-    $temp = Join-Path $env:TEMP ('dormant-webview2-{0}.nupkg' -f [guid]::NewGuid().ToString('N'))
-    $problem = 'the WebView2 components could not be downloaded'
-    $valid = $false
-    for ($attempt = 1; $attempt -le 3 -and -not $valid; $attempt++) {
-        try {
-            Invoke-Download -Uri $script:WebView2Sdk -OutFile $temp
-            if (Test-SdkPackage -Path $temp) {
-                $valid = $true
-            }
-            else {
-                $problem = Get-DownloadProblem -Path $temp
-            }
-        }
-        catch {
-            $problem = $_.Exception.Message
-        }
-        if (-not $valid) {
-            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds (2 * $attempt)
-        }
-    }
-    if (-not $valid) {
-        throw $problem
-    }
-
-    try {
-        if (-not (Test-Path -LiteralPath $script:CacheDir)) {
-            New-Item -ItemType Directory -Path $script:CacheDir -Force | Out-Null
-        }
-        $cached = Join-Path $script:CacheDir 'webview2-sdk.nupkg'
-        Copy-Item -LiteralPath $temp -Destination $cached -Force
-        if (Test-SdkPackage -Path $cached) {
-            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
-            return $cached
-        }
-        Remove-Item -LiteralPath $cached -Force -ErrorAction SilentlyContinue
-    }
-    catch {
-    }
-    return $temp
-}
-
-function Install-WebView2Sdk {
-    if (Test-SdkInstalled) {
-        return
-    }
-    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-    $package = Get-WebView2Package
-    $architecture = Get-LoaderArchitecture
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($package)
-    try {
-        $entries = @($archive.Entries)
-        foreach ($name in $script:SdkFiles) {
-            $pattern = '^lib/net4[0-9]*/' + [regex]::Escape($name) + '$'
-            $entry = $entries | Where-Object { $_.FullName -match $pattern } | Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $entry) {
-                throw ('{0} was not found in the WebView2 package' -f $name)
-            }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $script:Root $name), $true)
-        }
-        foreach ($flavor in $script:LoaderFlavors) {
-            $candidates = @(
-                ('runtimes/win-{0}/native/WebView2Loader.dll' -f $flavor),
-                ('build/native/{0}/WebView2Loader.dll' -f $flavor)
-            )
-            $loader = $entries | Where-Object { $candidates -contains $_.FullName } | Select-Object -First 1
-            if (-not $loader) {
-                if ($flavor -eq $architecture) {
-                    throw ('WebView2Loader.dll ({0}) was not found in the WebView2 package' -f $flavor)
-                }
-                continue
-            }
-            $folder = Join-Path $script:Root ('runtimes\win-{0}\native' -f $flavor)
-            New-Item -ItemType Directory -Path $folder -Force | Out-Null
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($loader, (Join-Path $folder 'WebView2Loader.dll'), $true)
-            if ($flavor -eq $architecture) {
-                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($loader, (Join-Path $script:Root 'WebView2Loader.dll'), $true)
-            }
-        }
-    }
-    finally {
-        $archive.Dispose()
-    }
-    if (-not (Test-SdkInstalled)) {
-        throw 'the WebView2 components could not be installed'
-    }
-}
-
 function Build-Player {
     Add-Type -AssemblyName System.Drawing, System.Windows.Forms, PresentationFramework, PresentationCore, WindowsBase, System.Xaml
     $references = @(
@@ -2043,9 +1733,6 @@ function Build-Player {
         [System.Windows.Window].Assembly.Location
         [System.Xaml.XamlSchemaContext].Assembly.Location
     ) | Select-Object -Unique
-    foreach ($name in $script:SdkFiles) {
-        $references += (Join-Path $script:Root $name)
-    }
     if (Test-Path -LiteralPath $script:ExePath) {
         Remove-Item -LiteralPath $script:ExePath -Force
     }
@@ -2191,11 +1878,11 @@ function Test-Playback {
     }
     $reason = switch ($process.ExitCode) {
         0 { $null }
-        10 { 'WebView2 could not start on this PC' }
-        11 { 'the loop page could not be loaded' }
+        10 { 'the player could not start on this PC' }
+        11 { 'the player could not load the video' }
         12 { 'this PC cannot play this video file. an H.264 .mp4 is the safest choice' }
         13 { 'the video did not start within 30 seconds' }
-        14 { 'the loop page is missing' }
+        14 { 'no video file was found' }
         15 { 'the player crashed' }
         default { 'the player stopped unexpectedly (code 0x{0:X8})' -f $process.ExitCode }
     }
@@ -2242,9 +1929,6 @@ function Install-Dormant {
     Invoke-Step 'copying logo' { Copy-Logo } -Soft
     Invoke-Step 'copying wallpapers' { Copy-Wallpapers } -Soft
     Invoke-Step 'copying web page' { Copy-Web } -Soft
-    Invoke-Step 'writing loop page' { Write-Page }
-    Invoke-Step 'checking WebView2 runtime' { Confirm-WebView2Runtime }
-    Invoke-Step 'getting WebView2 components' { Install-WebView2Sdk }
     Invoke-Step 'building player' { Build-Player }
     Invoke-Step 'testing playback (the video shows for a moment)' { Test-Playback }
     Invoke-Step 'enabling full hibernation' { Set-Hibernation }
