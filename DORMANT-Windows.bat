@@ -16,7 +16,7 @@ exit /b
   |____/  \___/ |_| \_\|_|  |_|/_/   \_\|_| \_|  |_|
 
   DORMANT  //  power schedule + idle loop system
-  v4.2.0   //  made by Marcelo Torres
+  v5.0.0   //  made by Marcelo Torres
   target   //  Windows 10 / 11
   usage    //  copy to a USB drive, double-click, choose a video
 #>
@@ -25,14 +25,20 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:Version        = '4.2.0'
+$script:Version        = '5.0.0'
 $script:Author         = 'Marcelo Torres'
 $script:Root           = Join-Path $env:ProgramData 'DORMANT'
 $script:ExePath        = Join-Path $script:Root 'DORMANT.exe'
+$script:VlcDir         = Join-Path $script:Root 'vlc'
 $script:TaskPath       = '\DORMANT\'
 $script:PowerCfg       = Join-Path $env:WINDIR 'System32\powercfg.exe'
 $script:CacheDir       = Join-Path (Split-Path -Parent $env:DORMANT_SELF) 'DORMANT-cache'
-$script:FfmpegUrl      = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+$script:VlcVersion     = '3.0.21'
+$script:VlcPackage     = 'https://api.nuget.org/v3-flatcontainer/videolan.libvlc.windows/3.0.21/videolan.libvlc.windows.3.0.21.nupkg'
+$script:VlcMirror      = 'https://www.nuget.org/api/v2/package/VideoLAN.LibVLC.Windows/3.0.21'
+$script:VlcCacheName   = 'libvlc-3.0.21.nupkg'
+$script:Engine         = 'native'
+$script:NeedVlc        = $false
 $script:Weekdays       = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
 $script:WakeWeek       = '10:00'
 $script:WakeSunday     = '12:00'
@@ -205,6 +211,372 @@ namespace Dormant
             gate.Dispose();
             gate = null;
         }
+    }
+
+    internal static class Vlc
+    {
+        public const int StateNothing = 0;
+        public const int StateOpening = 1;
+        public const int StateBuffering = 2;
+        public const int StatePlaying = 3;
+        public const int StatePaused = 4;
+        public const int StateStopped = 5;
+        public const int StateEnded = 6;
+        public const int StateError = 7;
+
+        private static IntPtr instance = IntPtr.Zero;
+        private static string loadError;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetDllDirectory(string path);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadLibrary(string path);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr libvlc_new(int argc, IntPtr[] argv);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr libvlc_errmsg();
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr libvlc_media_new_path(IntPtr instance, IntPtr path);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void libvlc_media_add_option(IntPtr media, IntPtr option);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void libvlc_media_release(IntPtr media);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr libvlc_media_player_new_from_media(IntPtr media);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void libvlc_media_player_set_hwnd(IntPtr player, IntPtr drawable);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int libvlc_media_player_play(IntPtr player);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void libvlc_media_player_stop(IntPtr player);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void libvlc_media_player_set_pause(IntPtr player, int pause);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int libvlc_media_player_get_state(IntPtr player);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void libvlc_video_set_mouse_input(IntPtr player, uint on);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void libvlc_video_set_key_input(IntPtr player, uint on);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void libvlc_video_set_crop_geometry(IntPtr player, IntPtr geometry);
+
+        [DllImport("libvlc.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void libvlc_audio_set_mute(IntPtr player, int status);
+
+        public static string Folder(string baseFolder)
+        {
+            return Path.Combine(baseFolder, "vlc");
+        }
+
+        public static IntPtr Instance(string baseFolder)
+        {
+            if (instance != IntPtr.Zero)
+            {
+                return instance;
+            }
+            if (loadError != null)
+            {
+                throw new InvalidOperationException(loadError);
+            }
+            string folder = Folder(baseFolder);
+            string core = Path.Combine(folder, "libvlccore.dll");
+            string main = Path.Combine(folder, "libvlc.dll");
+            if (!File.Exists(core) || !File.Exists(main))
+            {
+                loadError = "the VLC engine files are missing";
+                throw new InvalidOperationException(loadError);
+            }
+            SetDllDirectory(folder);
+            if (LoadLibrary(core) == IntPtr.Zero || LoadLibrary(main) == IntPtr.Zero)
+            {
+                loadError = string.Format(CultureInfo.InvariantCulture, "the VLC engine could not be loaded (error {0})", Marshal.GetLastWin32Error());
+                throw new InvalidOperationException(loadError);
+            }
+            string[] options = new string[]
+            {
+                "--no-audio",
+                "--no-video-title-show",
+                "--no-osd",
+                "--no-spu",
+                "--no-snapshot-preview",
+                "--no-stats",
+                "--no-sub-autodetect-file",
+                "--no-media-library",
+                "--input-repeat=65535",
+                "--quiet"
+            };
+            IntPtr[] argv = new IntPtr[options.Length];
+            try
+            {
+                for (int i = 0; i < options.Length; i++)
+                {
+                    argv[i] = Utf8(options[i]);
+                }
+                instance = libvlc_new(argv.Length, argv);
+            }
+            finally
+            {
+                for (int i = 0; i < argv.Length; i++)
+                {
+                    if (argv[i] != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(argv[i]);
+                    }
+                }
+            }
+            if (instance == IntPtr.Zero)
+            {
+                loadError = "the VLC engine could not start: " + LastError();
+                throw new InvalidOperationException(loadError);
+            }
+            return instance;
+        }
+
+        public static IntPtr CreatePlayer(IntPtr vlc, string path)
+        {
+            IntPtr pathText = Utf8(path);
+            IntPtr media;
+            try
+            {
+                media = libvlc_media_new_path(vlc, pathText);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pathText);
+            }
+            if (media == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("VLC could not open the video: " + LastError());
+            }
+            try
+            {
+                AddOption(media, ":input-repeat=65535");
+                AddOption(media, ":no-audio");
+                IntPtr player = libvlc_media_player_new_from_media(media);
+                if (player == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException("VLC could not create a player: " + LastError());
+                }
+                return player;
+            }
+            finally
+            {
+                libvlc_media_release(media);
+            }
+        }
+
+        public static void SetCrop(IntPtr player, string geometry)
+        {
+            IntPtr text = Utf8(geometry);
+            try
+            {
+                libvlc_video_set_crop_geometry(player, text);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(text);
+            }
+        }
+
+        private static void AddOption(IntPtr media, string option)
+        {
+            IntPtr text = Utf8(option);
+            try
+            {
+                libvlc_media_add_option(media, text);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(text);
+            }
+        }
+
+        private static string LastError()
+        {
+            try
+            {
+                IntPtr message = libvlc_errmsg();
+                if (message != IntPtr.Zero)
+                {
+                    string text = Marshal.PtrToStringAnsi(message);
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        return text;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+            }
+            return "no details";
+        }
+
+        private static IntPtr Utf8(string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
+            IntPtr buffer = Marshal.AllocHGlobal(bytes.Length + 1);
+            Marshal.Copy(bytes, 0, buffer, bytes.Length);
+            Marshal.WriteByte(buffer, bytes.Length, 0);
+            return buffer;
+        }
+    }
+
+    internal sealed class VlcPlayer
+    {
+        private readonly IntPtr player;
+        private readonly string crop;
+        private readonly DispatcherTimer watch;
+        private bool wantPlaying;
+        private bool started;
+        private bool announced;
+        private bool failed;
+
+        public event EventHandler Playing;
+        public event EventHandler<VlcFailure> Failed;
+
+        public VlcPlayer(string baseFolder, string videoPath, IntPtr drawable, int pixelWidth, int pixelHeight, Dispatcher dispatcher)
+        {
+            IntPtr vlc = Vlc.Instance(baseFolder);
+            player = Vlc.CreatePlayer(vlc, videoPath);
+            Vlc.libvlc_media_player_set_hwnd(player, drawable);
+            Vlc.libvlc_video_set_mouse_input(player, 0);
+            Vlc.libvlc_video_set_key_input(player, 0);
+            Vlc.libvlc_audio_set_mute(player, 1);
+            crop = pixelWidth > 0 && pixelHeight > 0
+                ? pixelWidth.ToString(CultureInfo.InvariantCulture) + ":" + pixelHeight.ToString(CultureInfo.InvariantCulture)
+                : null;
+            if (crop != null)
+            {
+                Vlc.SetCrop(player, crop);
+            }
+            watch = new DispatcherTimer(DispatcherPriority.Background, dispatcher);
+            watch.Interval = TimeSpan.FromMilliseconds(250);
+            watch.Tick += OnWatch;
+            watch.Start();
+        }
+
+        public void Play()
+        {
+            if (failed)
+            {
+                return;
+            }
+            wantPlaying = true;
+            if (!started)
+            {
+                started = true;
+                if (Vlc.libvlc_media_player_play(player) != 0)
+                {
+                    Fail("VLC refused to start the video");
+                }
+                return;
+            }
+            Vlc.libvlc_media_player_set_pause(player, 0);
+        }
+
+        public void Pause()
+        {
+            wantPlaying = false;
+            if (started && !failed)
+            {
+                Vlc.libvlc_media_player_set_pause(player, 1);
+            }
+        }
+
+        private void OnWatch(object sender, EventArgs e)
+        {
+            if (failed || !started)
+            {
+                return;
+            }
+            int state = Vlc.libvlc_media_player_get_state(player);
+            if (state == Vlc.StateError)
+            {
+                Fail("VLC could not decode this video");
+                return;
+            }
+            if (state == Vlc.StatePlaying)
+            {
+                if (!announced)
+                {
+                    announced = true;
+                    if (crop != null)
+                    {
+                        Vlc.SetCrop(player, crop);
+                    }
+                    EventHandler handler = Playing;
+                    if (handler != null)
+                    {
+                        handler(this, EventArgs.Empty);
+                    }
+                }
+                if (!wantPlaying)
+                {
+                    Vlc.libvlc_media_player_set_pause(player, 1);
+                }
+                return;
+            }
+            if (!wantPlaying)
+            {
+                return;
+            }
+            if (state == Vlc.StateEnded || state == Vlc.StateStopped || state == Vlc.StateNothing)
+            {
+                Vlc.libvlc_media_player_stop(player);
+                if (Vlc.libvlc_media_player_play(player) != 0)
+                {
+                    Fail("VLC could not restart the video");
+                }
+                return;
+            }
+            if (state == Vlc.StatePaused)
+            {
+                Vlc.libvlc_media_player_set_pause(player, 0);
+            }
+        }
+
+        private void Fail(string reason)
+        {
+            if (failed)
+            {
+                return;
+            }
+            failed = true;
+            watch.Stop();
+            EventHandler<VlcFailure> handler = Failed;
+            if (handler != null)
+            {
+                handler(this, new VlcFailure(reason));
+            }
+        }
+    }
+
+    internal sealed class VlcFailure : EventArgs
+    {
+        private readonly string reason;
+
+        public VlcFailure(string reason)
+        {
+            this.reason = reason;
+        }
+
+        public string Reason { get { return reason; } }
     }
 
     internal sealed class Native
@@ -465,6 +837,7 @@ namespace Dormant
         private static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
     }
 
+
     internal sealed class LoopScreen
     {
         private sealed class Layer
@@ -474,74 +847,315 @@ namespace Dormant
             public int Delay;
         }
 
-        private readonly LoopController owner;
-        private readonly bool primary;
-        private readonly bool testMode;
-        private readonly Window window;
-        private readonly MediaElement video;
-        private readonly List<Layer> layers = new List<Layer>();
-        private double scale;
-        private bool ready;
-        private bool broken;
-        private bool shown;
-
         private static readonly Color Snow = Color.FromRgb(0xF5, 0xF5, 0xF7);
         private static readonly Color Green = Color.FromRgb(0x30, 0xD1, 0x58);
 
-        public LoopScreen(LoopController controller, string videoPath, Rect bounds, bool primary, bool testMode, string logoPath)
+        private readonly LoopController owner;
+        private readonly string baseFolder;
+        private readonly string videoPath;
+        private readonly bool primary;
+        private readonly bool useVlc;
+        private readonly int pixelWidth;
+        private readonly int pixelHeight;
+        private readonly double scale;
+        private readonly Window stage;
+        private readonly Window overlay;
+        private readonly IntPtr stageHandle;
+        private readonly List<Layer> layers = new List<Layer>();
+        private MediaElement media;
+        private VlcPlayer vlc;
+        private bool broken;
+        private bool shown;
+
+        public LoopScreen(LoopController controller, string baseFolder, string videoPath, Rect pixelBounds, bool primary, bool useVlc, string logoPath)
         {
             owner = controller;
+            this.baseFolder = baseFolder;
+            this.videoPath = videoPath;
             this.primary = primary;
-            this.testMode = testMode;
-            scale = bounds.Height > 0 ? bounds.Height / 1080.0 : 1.0;
-            if (scale < 0.55) { scale = 0.55; }
+            this.useVlc = useVlc;
+            pixelWidth = (int)Math.Round(pixelBounds.Width);
+            pixelHeight = (int)Math.Round(pixelBounds.Height);
 
-            video = new MediaElement();
-            video.LoadedBehavior = MediaState.Manual;
-            video.UnloadedBehavior = MediaState.Manual;
-            video.Stretch = Stretch.UniformToFill;
-            video.IsMuted = true;
-            video.Volume = 0.0;
-            video.ScrubbingEnabled = false;
-            video.MediaOpened += OnMediaOpened;
-            video.MediaEnded += OnMediaEnded;
-            video.MediaFailed += OnMediaFailed;
-            try { video.Source = new Uri(videoPath, UriKind.Absolute); }
-            catch (Exception) { }
+            stage = new Window();
+            stage.Title = "DORMANT";
+            stage.WindowStyle = WindowStyle.None;
+            stage.ResizeMode = ResizeMode.NoResize;
+            stage.WindowStartupLocation = WindowStartupLocation.Manual;
+            stage.ShowInTaskbar = false;
+            stage.ShowActivated = primary;
+            stage.Topmost = true;
+            stage.Background = Brushes.Black;
+            stage.Cursor = Cursors.None;
+            stageHandle = new WindowInteropHelper(stage).EnsureHandle();
 
-            Grid root = new Grid();
-            root.Background = Brushes.Black;
-            root.Children.Add(video);
-            root.Children.Add(BuildScrim());
+            Rect bounds = ToDip(stageHandle, pixelBounds);
+            stage.Left = bounds.Left;
+            stage.Top = bounds.Top;
+            stage.Width = bounds.Width;
+            stage.Height = bounds.Height;
+            double ratio = bounds.Height > 0 ? bounds.Height / 1080.0 : 1.0;
+            scale = ratio < 0.55 ? 0.55 : ratio;
 
-            Register(root, BuildNotice(), 0);
-            Register(root, BuildSpecs(), 110);
-            Register(root, BuildLogo(logoPath), 220);
+            Grid stageRoot = new Grid();
+            stageRoot.Background = Brushes.Black;
+            if (!useVlc)
+            {
+                media = new MediaElement();
+                media.LoadedBehavior = MediaState.Manual;
+                media.UnloadedBehavior = MediaState.Manual;
+                media.Stretch = Stretch.UniformToFill;
+                media.IsMuted = true;
+                media.Volume = 0.0;
+                media.ScrubbingEnabled = false;
+                media.MediaOpened += OnMediaOpened;
+                media.MediaEnded += OnMediaEnded;
+                media.MediaFailed += OnMediaFailed;
+                stageRoot.Children.Add(media);
+            }
+            stage.Content = stageRoot;
+            stage.Closing += OnClosing;
 
-            window = new Window();
-            window.Title = "DORMANT";
-            window.WindowStyle = WindowStyle.None;
-            window.ResizeMode = ResizeMode.NoResize;
-            window.WindowStartupLocation = WindowStartupLocation.Manual;
-            window.WindowState = WindowState.Normal;
-            window.Left = bounds.Left;
-            window.Top = bounds.Top;
-            window.Width = bounds.Width;
-            window.Height = bounds.Height;
-            window.ShowInTaskbar = false;
-            window.ShowActivated = primary;
-            window.Topmost = true;
-            window.Background = Brushes.Black;
-            window.Cursor = Cursors.None;
-            window.Content = root;
-            window.Closing += OnClosing;
+            overlay = new Window();
+            overlay.Title = "DORMANT";
+            overlay.WindowStyle = WindowStyle.None;
+            overlay.AllowsTransparency = true;
+            overlay.Background = Brushes.Transparent;
+            overlay.ResizeMode = ResizeMode.NoResize;
+            overlay.WindowStartupLocation = WindowStartupLocation.Manual;
+            overlay.ShowInTaskbar = false;
+            overlay.ShowActivated = false;
+            overlay.Topmost = true;
+            overlay.Cursor = Cursors.None;
+            overlay.Left = bounds.Left;
+            overlay.Top = bounds.Top;
+            overlay.Width = bounds.Width;
+            overlay.Height = bounds.Height;
+            overlay.Owner = stage;
+
+            Grid overlayRoot = new Grid();
+            overlayRoot.Background = new SolidColorBrush(Color.FromArgb(0x01, 0, 0, 0));
+            overlayRoot.Children.Add(BuildScrim());
+            Register(overlayRoot, BuildNotice(), 0);
+            Register(overlayRoot, BuildSpecs(), 110);
+            Register(overlayRoot, BuildLogo(logoPath), 220);
+            overlay.Content = overlayRoot;
+            overlay.Closing += OnClosing;
         }
 
-        public bool Ready { get { return ready; } }
+        private static Rect ToDip(IntPtr handle, Rect pixels)
+        {
+            HwndSource source = HwndSource.FromHwnd(handle);
+            if (source != null && source.CompositionTarget != null)
+            {
+                Matrix transform = source.CompositionTarget.TransformFromDevice;
+                Point topLeft = transform.Transform(new Point(pixels.Left, pixels.Top));
+                Point bottomRight = transform.Transform(new Point(pixels.Right, pixels.Bottom));
+                return new Rect(topLeft, bottomRight);
+            }
+            return pixels;
+        }
+
+        public void Start()
+        {
+            if (useVlc)
+            {
+                try
+                {
+                    vlc = new VlcPlayer(baseFolder, videoPath, stageHandle, pixelWidth, pixelHeight, stage.Dispatcher);
+                    vlc.Playing += OnVlcPlaying;
+                    vlc.Failed += OnVlcFailed;
+                }
+                catch (Exception error)
+                {
+                    broken = true;
+                    owner.OnScreenFailed(ExitCodes.InitFailed, Program.Describe(error));
+                }
+                return;
+            }
+            try
+            {
+                media.Source = new Uri(videoPath, UriKind.Absolute);
+            }
+            catch (Exception error)
+            {
+                broken = true;
+                owner.OnScreenFailed(ExitCodes.VideoFailed, Program.Describe(error));
+            }
+        }
+
+        public void ShowWindow()
+        {
+            stage.Show();
+            overlay.Show();
+            stage.Topmost = true;
+            overlay.Topmost = true;
+            if (primary)
+            {
+                stage.Activate();
+                Native.SetForegroundWindow(stageHandle);
+            }
+        }
+
+        public void HideWindow()
+        {
+            overlay.Hide();
+            stage.Hide();
+        }
+
+        public void Play()
+        {
+            if (!broken)
+            {
+                PlayEngine();
+            }
+            Reveal();
+        }
+
+        public void Pause()
+        {
+            if (vlc != null)
+            {
+                vlc.Pause();
+            }
+            else if (media != null)
+            {
+                try
+                {
+                    media.Pause();
+                }
+                catch (Exception)
+                {
+                }
+            }
+            Conceal();
+        }
+
+        public void Ensure()
+        {
+            Raise();
+            if (!broken)
+            {
+                PlayEngine();
+            }
+            if (!shown)
+            {
+                Reveal();
+            }
+        }
+
+        public void Raise()
+        {
+            if (stage.IsVisible)
+            {
+                stage.Topmost = false;
+                stage.Topmost = true;
+            }
+            if (overlay.IsVisible)
+            {
+                overlay.Topmost = false;
+                overlay.Topmost = true;
+            }
+        }
+
+        private void PlayEngine()
+        {
+            if (vlc != null)
+            {
+                vlc.Play();
+                return;
+            }
+            if (media != null)
+            {
+                try
+                {
+                    media.Play();
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        private void OnMediaOpened(object sender, RoutedEventArgs e)
+        {
+            if (!media.HasVideo || media.NaturalVideoWidth <= 0)
+            {
+                Break(ExitCodes.VideoFailed, "Windows opened the file but cannot show its picture");
+                return;
+            }
+            owner.OnScreenReady(this);
+            if (shown)
+            {
+                PlayEngine();
+            }
+        }
+
+        private void OnMediaEnded(object sender, RoutedEventArgs e)
+        {
+            if (broken)
+            {
+                return;
+            }
+            try
+            {
+                media.Position = TimeSpan.Zero;
+                media.Play();
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        private void OnMediaFailed(object sender, ExceptionRoutedEventArgs e)
+        {
+            string detail = e != null && e.ErrorException != null ? Program.Describe(e.ErrorException) : "the video could not be decoded";
+            Break(ExitCodes.VideoFailed, detail);
+        }
+
+        private void OnVlcPlaying(object sender, EventArgs e)
+        {
+            owner.OnScreenReady(this);
+        }
+
+        private void OnVlcFailed(object sender, VlcFailure e)
+        {
+            Break(ExitCodes.VideoFailed, e.Reason);
+        }
+
+        private void Break(int code, string detail)
+        {
+            if (broken)
+            {
+                return;
+            }
+            broken = true;
+            if (media != null)
+            {
+                try
+                {
+                    media.Stop();
+                    media.Visibility = Visibility.Hidden;
+                }
+                catch (Exception)
+                {
+                }
+            }
+            owner.OnScreenFailed(code, detail);
+        }
+
+        private void OnClosing(object sender, CancelEventArgs e)
+        {
+            e.Cancel = true;
+            owner.RequestHide();
+        }
 
         private void Register(Grid root, FrameworkElement element, int delay)
         {
-            if (element == null) { return; }
+            if (element == null)
+            {
+                return;
+            }
             TranslateTransform shift = new TranslateTransform(0, 34 * scale);
             element.RenderTransform = shift;
             element.Opacity = 0.0;
@@ -553,12 +1167,51 @@ namespace Dormant
             layers.Add(layer);
         }
 
-        private SolidColorBrush Ink(double alpha)
+        private void Reveal()
         {
-            return new SolidColorBrush(Color.FromArgb((byte)(alpha * 255.0), Snow.R, Snow.G, Snow.B));
+            if (shown)
+            {
+                return;
+            }
+            shown = true;
+            foreach (Layer layer in layers)
+            {
+                DoubleAnimation fade = new DoubleAnimation(1.0, new Duration(TimeSpan.FromMilliseconds(720)));
+                fade.BeginTime = TimeSpan.FromMilliseconds(layer.Delay);
+                CubicEase fadeEase = new CubicEase();
+                fadeEase.EasingMode = EasingMode.EaseOut;
+                fade.EasingFunction = fadeEase;
+
+                DoubleAnimation slide = new DoubleAnimation(0.0, new Duration(TimeSpan.FromMilliseconds(900)));
+                slide.BeginTime = TimeSpan.FromMilliseconds(layer.Delay);
+                BackEase slideEase = new BackEase();
+                slideEase.Amplitude = 0.22;
+                slideEase.EasingMode = EasingMode.EaseOut;
+                slide.EasingFunction = slideEase;
+
+                layer.Element.BeginAnimation(UIElement.OpacityProperty, fade);
+                layer.Shift.BeginAnimation(TranslateTransform.YProperty, slide);
+            }
         }
 
-        private TextBlock Type(string text, double size, FontWeight weight, Brush brush)
+        private void Conceal()
+        {
+            shown = false;
+            foreach (Layer layer in layers)
+            {
+                layer.Element.BeginAnimation(UIElement.OpacityProperty, null);
+                layer.Shift.BeginAnimation(TranslateTransform.YProperty, null);
+                layer.Element.Opacity = 0.0;
+                layer.Shift.Y = 34 * scale;
+            }
+        }
+
+        private SolidColorBrush Ink(double alpha)
+        {
+            return new SolidColorBrush(Color.FromArgb((byte)Math.Round(alpha * 255.0), Snow.R, Snow.G, Snow.B));
+        }
+
+        private TextBlock Text(string text, double size, FontWeight weight, Brush brush, bool wrap)
         {
             TextBlock block = new TextBlock();
             block.Text = text;
@@ -566,15 +1219,19 @@ namespace Dormant
             block.FontSize = size * scale;
             block.FontWeight = weight;
             block.Foreground = brush;
-            block.TextWrapping = TextWrapping.Wrap;
+            block.TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap;
             return block;
         }
 
-        private TextBlock Line(string text, double size, FontWeight weight, Brush brush)
+        private DropShadowEffect Shadow(double blur, double depth, double opacity)
         {
-            TextBlock block = Type(text, size, weight, brush);
-            block.TextWrapping = TextWrapping.NoWrap;
-            return block;
+            DropShadowEffect shadow = new DropShadowEffect();
+            shadow.BlurRadius = blur * scale;
+            shadow.ShadowDepth = depth * scale;
+            shadow.Direction = 270;
+            shadow.Opacity = opacity;
+            shadow.Color = Colors.Black;
+            return shadow;
         }
 
         private Border Card()
@@ -585,12 +1242,7 @@ namespace Dormant
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(22 * scale);
             card.SnapsToDevicePixels = true;
-            card.Effect = new DropShadowEffect();
-            ((DropShadowEffect)card.Effect).BlurRadius = 60 * scale;
-            ((DropShadowEffect)card.Effect).ShadowDepth = 22 * scale;
-            ((DropShadowEffect)card.Effect).Direction = 270;
-            ((DropShadowEffect)card.Effect).Opacity = 0.55;
-            ((DropShadowEffect)card.Effect).Color = Colors.Black;
+            card.Effect = Shadow(60, 22, 0.55);
             return card;
         }
 
@@ -617,7 +1269,7 @@ namespace Dormant
                 return null;
             }
             StackPanel stack = new StackPanel();
-            TextBlock head = Line("THIS MACHINE", 11.5, FontWeights.SemiBold, Ink(0.42));
+            TextBlock head = Text("THIS MACHINE", 11.5, FontWeights.SemiBold, Ink(0.42), false);
             head.Margin = new Thickness(0, 0, 0, 15 * scale);
             stack.Children.Add(head);
             for (int i = 0; i < pairs.Count; i++)
@@ -628,19 +1280,19 @@ namespace Dormant
                 {
                     row.Margin = new Thickness(0, 10 * scale, 0, 0);
                 }
-                TextBlock key = Line(pairs[i].Key, 14, FontWeights.Normal, Ink(0.5));
+                TextBlock key = Text(pairs[i].Key, 14, FontWeights.Normal, Ink(0.5), false);
                 DockPanel.SetDock(key, Dock.Left);
-                TextBlock val = Line(pairs[i].Value, 14, FontWeights.SemiBold, Ink(0.95));
-                val.Margin = new Thickness(28 * scale, 0, 0, 0);
-                DockPanel.SetDock(val, Dock.Right);
+                TextBlock value = Text(pairs[i].Value, 14, FontWeights.SemiBold, Ink(0.95), false);
+                value.Margin = new Thickness(28 * scale, 0, 0, 0);
+                DockPanel.SetDock(value, Dock.Right);
                 row.Children.Add(key);
-                row.Children.Add(val);
+                row.Children.Add(value);
                 stack.Children.Add(row);
             }
             Border card = Card();
             card.Padding = new Thickness(26 * scale, 22 * scale, 28 * scale, 24 * scale);
             card.MinWidth = 270 * scale;
-            card.MaxWidth = 400 * scale;
+            card.MaxWidth = 420 * scale;
             card.HorizontalAlignment = HorizontalAlignment.Left;
             card.VerticalAlignment = VerticalAlignment.Top;
             card.Margin = new Thickness(48 * scale, 48 * scale, 0, 0);
@@ -655,12 +1307,13 @@ namespace Dormant
             DockPanel top = new DockPanel();
             top.LastChildFill = false;
             top.Margin = new Thickness(0, 0, 0, 20 * scale);
-            TextBlock brand = Line("AG LIQUIDATION", 12, FontWeights.SemiBold, Ink(0.55));
+            TextBlock brand = Text("AG LIQUIDATION", 12, FontWeights.SemiBold, Ink(0.55), false);
+            brand.VerticalAlignment = VerticalAlignment.Center;
             DockPanel.SetDock(brand, Dock.Left);
             top.Children.Add(brand);
 
             Border pill = new Border();
-            pill.Background = new SolidColorBrush(Color.FromArgb(0x26, 0x30, 0xD1, 0x58));
+            pill.Background = new SolidColorBrush(Color.FromArgb(0x26, Green.R, Green.G, Green.B));
             pill.CornerRadius = new CornerRadius(100);
             pill.Padding = new Thickness(11 * scale, 5 * scale, 13 * scale, 6 * scale);
             pill.VerticalAlignment = VerticalAlignment.Center;
@@ -677,26 +1330,28 @@ namespace Dormant
             DoubleAnimation pulse = new DoubleAnimation(1.0, 0.35, new Duration(TimeSpan.FromMilliseconds(1500)));
             pulse.AutoReverse = true;
             pulse.RepeatBehavior = RepeatBehavior.Forever;
-            pulse.EasingFunction = new SineEase();
-            ((SineEase)pulse.EasingFunction).EasingMode = EasingMode.EaseInOut;
+            SineEase pulseEase = new SineEase();
+            pulseEase.EasingMode = EasingMode.EaseInOut;
+            pulse.EasingFunction = pulseEase;
             dot.BeginAnimation(UIElement.OpacityProperty, pulse);
-            TextBlock ready = Line("Ready", 12, FontWeights.SemiBold, new SolidColorBrush(Color.FromRgb(0x63, 0xE6, 0x8A)));
+            TextBlock ready = Text("Ready", 12, FontWeights.SemiBold, new SolidColorBrush(Color.FromRgb(0x63, 0xE6, 0x8A)), false);
+            ready.VerticalAlignment = VerticalAlignment.Center;
             pillRow.Children.Add(dot);
             pillRow.Children.Add(ready);
             pill.Child = pillRow;
             top.Children.Add(pill);
             stack.Children.Add(top);
 
-            TextBlock title = Type("Ready when you are.", 33, FontWeights.SemiBold, Ink(1.0));
+            TextBlock title = Text("Ready when you are.", 33, FontWeights.SemiBold, Ink(1.0), true);
             title.Margin = new Thickness(0, 0, 0, 13 * scale);
             stack.Children.Add(title);
 
-            TextBlock body = Type("Every computer here comes with its programs fully installed and permanently activated.", 16.5, FontWeights.Normal, Ink(0.62));
+            TextBlock body = Text("Every computer here comes with its programs fully installed and permanently activated.", 16.5, FontWeights.Normal, Ink(0.62), true);
             body.LineHeight = 26 * scale;
             body.Margin = new Thickness(0, 0, 0, 9 * scale);
             stack.Children.Add(body);
 
-            TextBlock body2 = Type("Need something that isn't included? Ask any AG Liquidation team member — we're glad to help.", 16.5, FontWeights.Normal, Ink(0.62));
+            TextBlock body2 = Text("Need something that isn't included? Ask any AG Liquidation team member — we're glad to help.", 16.5, FontWeights.Normal, Ink(0.62), true);
             body2.LineHeight = 26 * scale;
             stack.Children.Add(body2);
 
@@ -732,182 +1387,13 @@ namespace Dormant
                 image.HorizontalAlignment = HorizontalAlignment.Right;
                 image.VerticalAlignment = VerticalAlignment.Bottom;
                 image.Margin = new Thickness(0, 0, 52 * scale, 52 * scale);
-                image.Effect = new DropShadowEffect();
-                ((DropShadowEffect)image.Effect).BlurRadius = 30 * scale;
-                ((DropShadowEffect)image.Effect).ShadowDepth = 9 * scale;
-                ((DropShadowEffect)image.Effect).Direction = 270;
-                ((DropShadowEffect)image.Effect).Opacity = 0.7;
-                ((DropShadowEffect)image.Effect).Color = Colors.Black;
+                image.Effect = Shadow(30, 9, 0.7);
                 return image;
             }
             catch (Exception)
             {
                 return null;
             }
-        }
-
-        public void ShowWindow()
-        {
-            window.Show();
-            window.Topmost = true;
-            if (primary)
-            {
-                window.Activate();
-                IntPtr handle = new WindowInteropHelper(window).Handle;
-                if (handle != IntPtr.Zero)
-                {
-                    Native.SetForegroundWindow(handle);
-                }
-            }
-        }
-
-        public void HideWindow()
-        {
-            window.Hide();
-        }
-
-        public void Start()
-        {
-        }
-
-        public void Play()
-        {
-            if (broken)
-            {
-                return;
-            }
-            try
-            {
-                video.Play();
-            }
-            catch (Exception)
-            {
-            }
-            Reveal();
-        }
-
-        public void Pause()
-        {
-            try
-            {
-                video.Pause();
-            }
-            catch (Exception)
-            {
-            }
-            Conceal();
-        }
-
-        public void Ensure()
-        {
-            Raise();
-            if (broken)
-            {
-                return;
-            }
-            try
-            {
-                video.Play();
-            }
-            catch (Exception)
-            {
-            }
-            if (!shown)
-            {
-                Reveal();
-            }
-        }
-
-        public void Raise()
-        {
-            if (window.IsVisible)
-            {
-                window.Topmost = false;
-                window.Topmost = true;
-            }
-        }
-
-        private void Reveal()
-        {
-            shown = true;
-            foreach (Layer layer in layers)
-            {
-                DoubleAnimation fade = new DoubleAnimation(1.0, new Duration(TimeSpan.FromMilliseconds(720)));
-                fade.BeginTime = TimeSpan.FromMilliseconds(layer.Delay);
-                fade.EasingFunction = new CubicEase();
-                ((CubicEase)fade.EasingFunction).EasingMode = EasingMode.EaseOut;
-                DoubleAnimation slide = new DoubleAnimation(0.0, new Duration(TimeSpan.FromMilliseconds(900)));
-                slide.BeginTime = TimeSpan.FromMilliseconds(layer.Delay);
-                slide.EasingFunction = new BackEase();
-                ((BackEase)slide.EasingFunction).Amplitude = 0.22;
-                ((BackEase)slide.EasingFunction).EasingMode = EasingMode.EaseOut;
-                layer.Element.BeginAnimation(UIElement.OpacityProperty, fade);
-                layer.Shift.BeginAnimation(TranslateTransform.YProperty, slide);
-            }
-        }
-
-        private void Conceal()
-        {
-            shown = false;
-            foreach (Layer layer in layers)
-            {
-                layer.Element.BeginAnimation(UIElement.OpacityProperty, null);
-                layer.Shift.BeginAnimation(TranslateTransform.YProperty, null);
-                layer.Element.Opacity = 0.0;
-                layer.Shift.Y = 34 * scale;
-            }
-        }
-
-        private void OnMediaOpened(object sender, RoutedEventArgs e)
-        {
-            ready = true;
-            owner.OnScreenReady(this);
-            if (shown)
-            {
-                try
-                {
-                    video.Play();
-                }
-                catch (Exception)
-                {
-                }
-            }
-        }
-
-        private void OnMediaEnded(object sender, RoutedEventArgs e)
-        {
-            if (broken)
-            {
-                return;
-            }
-            try
-            {
-                video.Position = TimeSpan.Zero;
-                video.Play();
-            }
-            catch (Exception)
-            {
-            }
-        }
-
-        private void OnMediaFailed(object sender, ExceptionRoutedEventArgs e)
-        {
-            broken = true;
-            try
-            {
-                video.Visibility = Visibility.Hidden;
-            }
-            catch (Exception)
-            {
-            }
-            string detail = e != null && e.ErrorException != null ? Program.Describe(e.ErrorException) : "the video could not be decoded";
-            owner.OnScreenFailed(ExitCodes.VideoFailed, detail);
-        }
-
-        private void OnClosing(object sender, CancelEventArgs e)
-        {
-            e.Cancel = true;
-            owner.RequestHide();
         }
     }
 
@@ -919,7 +1405,6 @@ namespace Dormant
         private static readonly string[] Formats = new string[] { ".mp4", ".m4v", ".mov", ".mkv", ".avi", ".wmv", ".webm", ".mpg", ".mpeg", ".m2ts", ".ts", ".flv", ".3gp", ".ogv", ".ogg" };
 
         private readonly bool testMode;
-        private readonly string baseFolder;
         private readonly string nightFlag;
         private readonly string indexPath;
         private readonly Dispatcher dispatcher;
@@ -942,7 +1427,6 @@ namespace Dormant
 
         public LoopController(string baseFolder, bool testMode)
         {
-            this.baseFolder = baseFolder;
             this.testMode = testMode;
             nightFlag = Path.Combine(baseFolder, "night.flag");
             indexPath = Path.Combine(baseFolder, "web", "index.html");
@@ -950,12 +1434,13 @@ namespace Dormant
 
             string[] videoList = VideoList(baseFolder);
             string logoPath = Path.Combine(baseFolder, "logo.png");
+            bool useVlc = ReadEngine(baseFolder) == "vlc";
             Rect[] areas = ScreenAreas();
             for (int index = 0; index < areas.Length; index++)
             {
                 string name = index < videoList.Length ? videoList[index] : videoList[videoList.Length - 1];
                 string videoPath = Path.Combine(baseFolder, name);
-                LoopScreen screen = new LoopScreen(this, videoPath, areas[index], index == 0, testMode, logoPath);
+                LoopScreen screen = new LoopScreen(this, baseFolder, videoPath, areas[index], index == 0, useVlc, logoPath);
                 screens.Add(screen);
             }
 
@@ -988,6 +1473,22 @@ namespace Dormant
             {
                 poll.Start();
             }
+        }
+
+        private static string ReadEngine(string baseFolder)
+        {
+            try
+            {
+                string path = Path.Combine(baseFolder, "engine.txt");
+                if (File.Exists(path))
+                {
+                    return File.ReadAllText(path).Trim().ToLowerInvariant();
+                }
+            }
+            catch (Exception)
+            {
+            }
+            return "native";
         }
 
         public static string FirstVideo(string baseFolder)
@@ -1424,7 +1925,7 @@ function Show-Banner {
     Write-Line ('  WAKE    mon-sat {0}    sun {1}' -f $script:WakeWeek, $script:WakeSunday)
     Write-Line ('  SLEEP   mon-sat {0}    sun {1}' -f $script:SleepWeek, $script:SleepSunday)
     Write-Line '  LOOP    after 30s of no input'
-    Write-Line '  VIDEO   any format - auto-converted to mp4'
+    Write-Line '  VIDEO   any format - Windows player, VLC engine when needed'
     Write-Rule
     Write-Line
 }
@@ -1575,7 +2076,7 @@ function Initialize-Root {
     if (-not (Test-Path -LiteralPath $script:Root)) {
         New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
     }
-    foreach ($pattern in @('loop*.*', 'logo.*', 'wallpaper.*', 'wallpaper-ultrawide.*', 'videos.txt', 'night.flag')) {
+    foreach ($pattern in @('loop*.*', 'logo.*', 'wallpaper.*', 'wallpaper-ultrawide.*', 'videos.txt', 'engine.txt', 'night.flag')) {
         Get-ChildItem -LiteralPath $script:Root -Filter $pattern -File -ErrorAction SilentlyContinue | Remove-Item -Force
     }
     $webTarget = Join-Path $script:Root 'web'
@@ -1606,77 +2107,9 @@ function Invoke-Download {
     }
 }
 
-function Resolve-Ffmpeg {
-    $existing = Get-Command 'ffmpeg.exe' -ErrorAction SilentlyContinue
-    if ($existing -and $existing.Source) {
-        return $existing.Source
-    }
-    $cached = Join-Path $script:CacheDir 'ffmpeg.exe'
-    if (Test-Path -LiteralPath $cached) {
-        return $cached
-    }
-    $onUsb = Find-UsbAsset -RelativePaths @('DORMANT-cache\ffmpeg.exe', 'ffmpeg.exe', 'Dormant\DORMANT-cache\ffmpeg.exe')
-    if ($onUsb) {
-        return $onUsb
-    }
-    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-    $zip = Join-Path $env:TEMP ('dormant-ffmpeg-{0}.zip' -f [guid]::NewGuid().ToString('N'))
-    try {
-        Invoke-Download -Uri $script:FfmpegUrl -OutFile $zip
-        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
-        try {
-            $entry = $archive.Entries | Where-Object { $_.FullName -match '(^|/)bin/ffmpeg\.exe$' } | Select-Object -First 1
-            if (-not $entry) {
-                throw 'ffmpeg.exe was not found in the download'
-            }
-            if (-not (Test-Path -LiteralPath $script:CacheDir)) {
-                New-Item -ItemType Directory -Path $script:CacheDir -Force | Out-Null
-            }
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $cached, $true)
-        }
-        finally {
-            $archive.Dispose()
-        }
-    }
-    finally {
-        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-    }
-    if (-not (Test-Path -LiteralPath $cached) -or (Get-Item -LiteralPath $cached).Length -le 0) {
-        throw 'the video converter could not be set up. check the internet connection and run the installer again, or choose an H.264 .mp4'
-    }
-    return $cached
-}
-
-function Convert-ToMp4 {
-    param(
-        [Parameter(Mandatory = $true)][string]$Ffmpeg,
-        [Parameter(Mandatory = $true)][string]$Source,
-        [Parameter(Mandatory = $true)][string]$Destination
-    )
-    if (Test-Path -LiteralPath $Destination) {
-        Remove-Item -LiteralPath $Destination -Force
-    }
-    $arguments = @(
-        '-y', '-hide_banner', '-loglevel', 'error',
-        '-i', $Source,
-        '-an',
-        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
-        '-pix_fmt', 'yuv420p', '-profile:v', 'high',
-        '-movflags', '+faststart',
-        $Destination
-    )
-    Invoke-Native -FilePath $Ffmpeg -Arguments $arguments
-    if (-not (Test-Path -LiteralPath $Destination) -or (Get-Item -LiteralPath $Destination).Length -le 0) {
-        throw 'the video could not be converted to mp4'
-    }
-}
-
 function Copy-Videos {
     param([Parameter(Mandatory = $true)][string[]]$Sources)
-    $passthru = @('.mp4', '.m4v')
     $names = @()
-    $ffmpeg = $null
     for ($index = 0; $index -lt $Sources.Count; $index++) {
         $source = $Sources[$index]
         $extension = [System.IO.Path]::GetExtension($source).ToLowerInvariant()
@@ -1686,21 +2119,133 @@ function Copy-Videos {
         if ((Get-Item -LiteralPath $source).Length -le 0) {
             throw 'one of the selected videos is empty'
         }
-        $name = if ($index -eq 0) { 'loop.mp4' } else { ('loop{0}.mp4' -f ($index + 1)) }
-        $target = Join-Path $script:Root $name
-        if ($passthru -contains $extension) {
-            Copy-Item -LiteralPath $source -Destination $target -Force
-        }
-        else {
-            if (-not $ffmpeg) {
-                $ffmpeg = Resolve-Ffmpeg
-            }
-            Convert-ToMp4 -Ffmpeg $ffmpeg -Source $source -Destination $target
-        }
+        $name = if ($index -eq 0) { 'loop' + $extension } else { ('loop{0}{1}' -f ($index + 1), $extension) }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $script:Root $name) -Force
         $names += $name
     }
     [System.IO.File]::WriteAllText((Join-Path $script:Root 'videos.txt'), ($names -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
     return $names[0]
+}
+
+function Get-VlcFlavor {
+    if ([Environment]::Is64BitOperatingSystem) {
+        return 'x64'
+    }
+    return 'x86'
+}
+
+function Test-VlcPackage {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $flavor = Get-VlcFlavor
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    }
+    catch {
+        return $false
+    }
+    try {
+        $names = @($archive.Entries | ForEach-Object { $_.FullName })
+        return ($names -contains ('build/{0}/libvlc.dll' -f $flavor)) -and ($names -contains ('build/{0}/libvlccore.dll' -f $flavor))
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+function Get-VlcPackage {
+    $cached = Find-UsbAsset -RelativePaths @(('DORMANT-cache\' + $script:VlcCacheName), ('Dormant\DORMANT-cache\' + $script:VlcCacheName))
+    if ($cached) {
+        if (Test-VlcPackage -Path $cached) {
+            return $cached
+        }
+        Remove-Item -LiteralPath $cached -Force -ErrorAction SilentlyContinue
+    }
+
+    $temp = Join-Path $env:TEMP ('dormant-libvlc-{0}.nupkg' -f [guid]::NewGuid().ToString('N'))
+    $problem = 'the VLC engine could not be downloaded'
+    $valid = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $valid; $attempt++) {
+        try {
+            $uri = if ($attempt % 2 -eq 0) { $script:VlcMirror } else { $script:VlcPackage }
+            Invoke-Download -Uri $uri -OutFile $temp
+            if (Test-VlcPackage -Path $temp) {
+                $valid = $true
+            }
+            else {
+                $problem = 'the download came back damaged. if this network has a login page, finish it and run the installer again'
+            }
+        }
+        catch {
+            $problem = $_.Exception.Message
+        }
+        if (-not $valid) {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+    if (-not $valid) {
+        throw $problem
+    }
+
+    try {
+        if (-not (Test-Path -LiteralPath $script:CacheDir)) {
+            New-Item -ItemType Directory -Path $script:CacheDir -Force | Out-Null
+        }
+        $keep = Join-Path $script:CacheDir $script:VlcCacheName
+        Copy-Item -LiteralPath $temp -Destination $keep -Force
+        if (Test-VlcPackage -Path $keep) {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+            return $keep
+        }
+        Remove-Item -LiteralPath $keep -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+    }
+    return $temp
+}
+
+function Install-Vlc {
+    $flavor = Get-VlcFlavor
+    $stamp = '{0}-{1}' -f $script:VlcVersion, $flavor
+    $marker = Join-Path $script:VlcDir 'version.txt'
+    if ((Test-Path -LiteralPath (Join-Path $script:VlcDir 'libvlc.dll')) -and (Test-Path -LiteralPath (Join-Path $script:VlcDir 'libvlccore.dll')) -and (Test-Path -LiteralPath $marker)) {
+        if (([System.IO.File]::ReadAllText($marker)).Trim() -eq $stamp) {
+            return
+        }
+    }
+    if (Test-Path -LiteralPath $script:VlcDir) {
+        Remove-Item -LiteralPath $script:VlcDir -Recurse -Force
+    }
+    $package = Get-VlcPackage
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $prefix = 'build/{0}/' -f $flavor
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($package)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $full = $entry.FullName
+            if (-not $full.StartsWith($prefix) -or -not $entry.Name) {
+                continue
+            }
+            $relative = $full.Substring($prefix.Length)
+            if ($relative -ne 'libvlc.dll' -and $relative -ne 'libvlccore.dll' -and -not $relative.StartsWith('plugins/')) {
+                continue
+            }
+            $target = Join-Path $script:VlcDir ($relative -replace '/', '\')
+            $folder = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $folder)) {
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $script:VlcDir 'libvlc.dll')) -or -not (Test-Path -LiteralPath (Join-Path $script:VlcDir 'plugins'))) {
+        throw 'the VLC engine could not be unpacked'
+    }
+    [System.IO.File]::WriteAllText($marker, $stamp, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Find-UsbAsset {
@@ -1956,36 +2501,62 @@ function Start-Loop {
     throw 'the loop did not start now. it will start at the next sign-in.'
 }
 
-function Test-Playback {
+function Set-Engine {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $script:Engine = $Name
+    [System.IO.File]::WriteAllText((Join-Path $script:Root 'engine.txt'), $Name, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Invoke-PlaybackTest {
     $resultFile = Join-Path $env:TEMP ('dormant-test-{0}.txt' -f [guid]::NewGuid().ToString('N'))
     $process = Start-Process -FilePath $script:ExePath -ArgumentList @('--test', ('"{0}"' -f $resultFile)) -WorkingDirectory $script:Root -PassThru
     $null = $process.Handle
     if (-not $process.WaitForExit(60000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw 'the playback test did not finish in time'
+        return [pscustomobject]@{ Code = 13; Detail = '' }
     }
     $detail = ''
     if (Test-Path -LiteralPath $resultFile) {
         $detail = ([System.IO.File]::ReadAllText($resultFile)).Trim()
         Remove-Item -LiteralPath $resultFile -Force -ErrorAction SilentlyContinue
     }
-    $reason = switch ($process.ExitCode) {
-        0 { $null }
-        10 { 'the player could not start on this PC' }
+    return [pscustomobject]@{ Code = $process.ExitCode; Detail = $detail }
+}
+
+function Get-PlaybackFailure {
+    param([Parameter(Mandatory = $true)]$Result)
+    $reason = switch ($Result.Code) {
+        10 { 'the video engine could not start on this PC' }
         11 { 'the player could not load the video' }
-        12 { 'this PC cannot play this video file. an H.264 .mp4 is the safest choice' }
+        12 { 'this video could not be played' }
         13 { 'the video did not start within 30 seconds' }
         14 { 'no video file was found' }
         15 { 'the player crashed' }
-        default { 'the player stopped unexpectedly (code 0x{0:X8})' -f $process.ExitCode }
+        default { 'the player stopped unexpectedly (code 0x{0:X8})' -f $Result.Code }
     }
-    if (-not $reason) {
+    if ($Result.Detail) {
+        return ('{0}{1}         {2}' -f $reason, [Environment]::NewLine, $Result.Detail)
+    }
+    return $reason
+}
+
+function Test-NativePlayback {
+    Set-Engine 'native'
+    $result = Invoke-PlaybackTest
+    if ($result.Code -eq 0) {
         return
     }
-    if ($detail) {
-        throw ('{0}{1}         {2}' -f $reason, [Environment]::NewLine, $detail)
+    $script:NeedVlc = $true
+    throw 'Windows cannot play this video by itself. switching to the VLC engine'
+}
+
+function Test-VlcPlayback {
+    Set-Engine 'vlc'
+    $result = Invoke-PlaybackTest
+    if ($result.Code -eq 0) {
+        return
     }
-    throw $reason
+    throw (Get-PlaybackFailure -Result $result)
 }
 
 function Remove-Root {
@@ -2018,12 +2589,22 @@ function Install-Dormant {
     $script:Hibernate = $false
     Invoke-Step 'stopping previous instance' { Stop-Loop; Remove-Tasks }
     Invoke-Step 'preparing install folder' { Initialize-Root; Remove-Item -LiteralPath $script:NightFlag -Force -ErrorAction SilentlyContinue }
-    Invoke-Step 'copying video (converts if needed)' { $script:VideoName = Copy-Videos -Sources $videos }
+    Invoke-Step 'copying video' { $script:VideoName = Copy-Videos -Sources $videos }
     Invoke-Step 'copying logo' { Copy-Logo } -Soft
     Invoke-Step 'copying wallpapers' { Copy-Wallpapers } -Soft
     Invoke-Step 'copying web page' { Copy-Web } -Soft
     Invoke-Step 'building player' { Build-Player }
-    Invoke-Step 'testing playback (the video shows for a moment)' { Test-Playback }
+    $script:NeedVlc = $false
+    Invoke-Step 'testing playback (the video shows for a moment)' { Test-NativePlayback } -Soft
+    if ($script:NeedVlc) {
+        Invoke-Step 'getting VLC engine (one time, about 90 MB)' { Install-Vlc }
+        if (Test-Path -LiteralPath (Join-Path $script:VlcDir 'version.txt')) {
+            Invoke-Step 'testing playback with VLC' { Test-VlcPlayback }
+        }
+        else {
+            Set-Engine 'native'
+        }
+    }
     Invoke-Step 'enabling full hibernation' { Set-Hibernation }
     Invoke-Step 'allowing wake timers' { Set-PowerValue -Group 'SUB_SLEEP' -Setting 'RTCWAKE' -Value '1' }
     Invoke-Step 'skipping sign-in on wake' { Set-PowerValue -Group 'SUB_NONE' -Setting 'CONSOLELOCK' -Value '0' } -Soft
