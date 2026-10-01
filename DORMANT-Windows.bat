@@ -16,7 +16,7 @@ exit /b
   |____/  \___/ |_| \_\|_|  |_|/_/   \_\|_| \_|  |_|
 
   DORMANT  //  power schedule + idle loop system
-  v4.1.0   //  made by Marcelo Torres
+  v4.2.0   //  made by Marcelo Torres
   target   //  Windows 10 / 11
   usage    //  copy to a USB drive, double-click, choose a video
 #>
@@ -25,13 +25,14 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:Version        = '4.1.0'
+$script:Version        = '4.2.0'
 $script:Author         = 'Marcelo Torres'
 $script:Root           = Join-Path $env:ProgramData 'DORMANT'
 $script:ExePath        = Join-Path $script:Root 'DORMANT.exe'
 $script:TaskPath       = '\DORMANT\'
 $script:PowerCfg       = Join-Path $env:WINDIR 'System32\powercfg.exe'
 $script:CacheDir       = Join-Path (Split-Path -Parent $env:DORMANT_SELF) 'DORMANT-cache'
+$script:FfmpegUrl      = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
 $script:Weekdays       = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
 $script:WakeWeek       = '10:00'
 $script:WakeSunday     = '12:00'
@@ -1423,7 +1424,7 @@ function Show-Banner {
     Write-Line ('  WAKE    mon-sat {0}    sun {1}' -f $script:WakeWeek, $script:WakeSunday)
     Write-Line ('  SLEEP   mon-sat {0}    sun {1}' -f $script:SleepWeek, $script:SleepSunday)
     Write-Line '  LOOP    after 30s of no input'
-    Write-Line '  VIDEO   mp4 / mov / mkv / avi / wmv / more'
+    Write-Line '  VIDEO   any format - auto-converted to mp4'
     Write-Rule
     Write-Line
 }
@@ -1593,9 +1594,89 @@ function Initialize-Root {
     }
 }
 
+function Invoke-Download {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$OutFile
+    )
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+    if (-not (Test-Path -LiteralPath $OutFile) -or (Get-Item -LiteralPath $OutFile).Length -le 0) {
+        throw ('download failed: {0}' -f $Uri)
+    }
+}
+
+function Resolve-Ffmpeg {
+    $existing = Get-Command 'ffmpeg.exe' -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Source) {
+        return $existing.Source
+    }
+    $cached = Join-Path $script:CacheDir 'ffmpeg.exe'
+    if (Test-Path -LiteralPath $cached) {
+        return $cached
+    }
+    $onUsb = Find-UsbAsset -RelativePaths @('DORMANT-cache\ffmpeg.exe', 'ffmpeg.exe', 'Dormant\DORMANT-cache\ffmpeg.exe')
+    if ($onUsb) {
+        return $onUsb
+    }
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $zip = Join-Path $env:TEMP ('dormant-ffmpeg-{0}.zip' -f [guid]::NewGuid().ToString('N'))
+    try {
+        Invoke-Download -Uri $script:FfmpegUrl -OutFile $zip
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            $entry = $archive.Entries | Where-Object { $_.FullName -match '(^|/)bin/ffmpeg\.exe$' } | Select-Object -First 1
+            if (-not $entry) {
+                throw 'ffmpeg.exe was not found in the download'
+            }
+            if (-not (Test-Path -LiteralPath $script:CacheDir)) {
+                New-Item -ItemType Directory -Path $script:CacheDir -Force | Out-Null
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $cached, $true)
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path -LiteralPath $cached) -or (Get-Item -LiteralPath $cached).Length -le 0) {
+        throw 'the video converter could not be set up. check the internet connection and run the installer again, or choose an H.264 .mp4'
+    }
+    return $cached
+}
+
+function Convert-ToMp4 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Ffmpeg,
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Force
+    }
+    $arguments = @(
+        '-y', '-hide_banner', '-loglevel', 'error',
+        '-i', $Source,
+        '-an',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+        '-pix_fmt', 'yuv420p', '-profile:v', 'high',
+        '-movflags', '+faststart',
+        $Destination
+    )
+    Invoke-Native -FilePath $Ffmpeg -Arguments $arguments
+    if (-not (Test-Path -LiteralPath $Destination) -or (Get-Item -LiteralPath $Destination).Length -le 0) {
+        throw 'the video could not be converted to mp4'
+    }
+}
+
 function Copy-Videos {
     param([Parameter(Mandatory = $true)][string[]]$Sources)
+    $passthru = @('.mp4', '.m4v')
     $names = @()
+    $ffmpeg = $null
     for ($index = 0; $index -lt $Sources.Count; $index++) {
         $source = $Sources[$index]
         $extension = [System.IO.Path]::GetExtension($source).ToLowerInvariant()
@@ -1605,8 +1686,17 @@ function Copy-Videos {
         if ((Get-Item -LiteralPath $source).Length -le 0) {
             throw 'one of the selected videos is empty'
         }
-        $name = if ($index -eq 0) { 'loop' + $extension } else { ('loop{0}{1}' -f ($index + 1), $extension) }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $script:Root $name) -Force
+        $name = if ($index -eq 0) { 'loop.mp4' } else { ('loop{0}.mp4' -f ($index + 1)) }
+        $target = Join-Path $script:Root $name
+        if ($passthru -contains $extension) {
+            Copy-Item -LiteralPath $source -Destination $target -Force
+        }
+        else {
+            if (-not $ffmpeg) {
+                $ffmpeg = Resolve-Ffmpeg
+            }
+            Convert-ToMp4 -Ffmpeg $ffmpeg -Source $source -Destination $target
+        }
         $names += $name
     }
     [System.IO.File]::WriteAllText((Join-Path $script:Root 'videos.txt'), ($names -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
@@ -1928,7 +2018,7 @@ function Install-Dormant {
     $script:Hibernate = $false
     Invoke-Step 'stopping previous instance' { Stop-Loop; Remove-Tasks }
     Invoke-Step 'preparing install folder' { Initialize-Root; Remove-Item -LiteralPath $script:NightFlag -Force -ErrorAction SilentlyContinue }
-    Invoke-Step 'copying video' { $script:VideoName = Copy-Videos -Sources $videos }
+    Invoke-Step 'copying video (converts if needed)' { $script:VideoName = Copy-Videos -Sources $videos }
     Invoke-Step 'copying logo' { Copy-Logo } -Soft
     Invoke-Step 'copying wallpapers' { Copy-Wallpapers } -Soft
     Invoke-Step 'copying web page' { Copy-Web } -Soft
