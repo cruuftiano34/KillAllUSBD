@@ -25,7 +25,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:Version        = '3.0.0'
+$script:Version        = '3.1.0'
 $script:Author         = 'Marcelo Torres'
 $script:Root           = Join-Path $env:ProgramData 'DORMANT'
 $script:ExePath        = Join-Path $script:Root 'DORMANT.exe'
@@ -41,8 +41,8 @@ $script:SleepSunday    = '17:00'
 $script:Formats        = @('.mp4', '.m4v', '.mov', '.webm')
 $script:WebView2Id     = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
 $script:WebView2Setup  = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
-$script:WebView2SdkVer = '1.0.2210.55'
-$script:WebView2Sdk    = 'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2210.55'
+$script:WebView2SdkVer = '1.0.1518.46'
+$script:WebView2Sdk    = 'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1518.46'
 $script:SdkFiles       = @('Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll')
 $script:LoaderFlavors  = @('x64', 'x86', 'arm64')
 $script:LogoPaths      = @('AgLogo\AgLogo.png', 'AgLogo.png', 'Dormant\AgLogo\AgLogo.png', 'AgLogo\AgLogo.jpg', 'AgLogo.jpg')
@@ -160,6 +160,31 @@ namespace Dormant
             }
             string message = (root.Message ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
             return string.Format("{0} (0x{1:X8}): {2}", root.GetType().Name, root.HResult, message);
+        }
+
+        public static string RuntimeInfo()
+        {
+            StringBuilder builder = new StringBuilder();
+            try
+            {
+                Version sdk = typeof(CoreWebView2Environment).Assembly.GetName().Version;
+                builder.Append("sdk ").Append(sdk == null ? "?" : sdk.ToString());
+            }
+            catch (Exception)
+            {
+                builder.Append("sdk ?");
+            }
+            builder.Append(", runtime ");
+            try
+            {
+                string runtime = CoreWebView2Environment.GetAvailableBrowserVersionString(null);
+                builder.Append(string.IsNullOrEmpty(runtime) ? "none" : runtime);
+            }
+            catch (Exception ex)
+            {
+                builder.Append("not found (").Append(Describe(ex)).Append(")");
+            }
+            return builder.ToString();
         }
 
         public static void ReportTest(string detail)
@@ -581,7 +606,7 @@ namespace Dormant
             }
             catch (Exception error)
             {
-                owner.OnScreenFailed(ExitCodes.InitFailed, Program.Describe(error));
+                owner.OnScreenFailed(ExitCodes.InitFailed, Program.Describe(error) + " | " + Program.RuntimeInfo());
             }
         }
 
