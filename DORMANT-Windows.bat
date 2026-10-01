@@ -1610,6 +1610,16 @@ function Initialize-Root {
     if (Test-Path -LiteralPath $webTarget) {
         Remove-Item -LiteralPath $webTarget -Recurse -Force
     }
+    foreach ($name in @('DORMANT.exe', 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll')) {
+        $stale = Join-Path $script:Root $name
+        if (Test-Path -LiteralPath $stale) {
+            Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $runtimesTarget = Join-Path $script:Root 'runtimes'
+    if (Test-Path -LiteralPath $runtimesTarget) {
+        Remove-Item -LiteralPath $runtimesTarget -Recurse -Force
+    }
 }
 
 function Copy-Videos {
@@ -1829,7 +1839,25 @@ function Test-SdkPackage {
     }
     try {
         $core = @($archive.Entries | Where-Object { $_.FullName -match '^lib/net4[0-9]*/Microsoft\.Web\.WebView2\.Core\.dll$' })
-        return $core.Count -gt 0
+        if ($core.Count -le 0) {
+            return $false
+        }
+        $spec = $archive.Entries | Where-Object { $_.FullName -match '(?i)\.nuspec$' } | Select-Object -First 1
+        if (-not $spec) {
+            return $false
+        }
+        $reader = New-Object System.IO.StreamReader($spec.Open())
+        try {
+            $text = $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+        $match = [regex]::Match($text, '<version>\s*([^<\s]+)\s*</version>')
+        if (-not $match.Success) {
+            return $false
+        }
+        return $match.Groups[1].Value -eq $script:WebView2SdkVer
     }
     finally {
         $archive.Dispose()
